@@ -10,6 +10,7 @@ from general_bot.types import UserId
 # Function that returns a coroutine when called.
 # Example: lambda: send_message(user_id)
 Job = Callable[[], Awaitable[None]]
+
 Messages = list[Message]
 
 
