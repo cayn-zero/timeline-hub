@@ -15,19 +15,19 @@ from general_bot.types import ChatId
 router = Router()
 
 
-class VideoAction(StrEnum):
+class ClipAction(StrEnum):
     NORMALIZE = auto()
     CANCEL = auto()
 
 
-class VideoCallback(CallbackData, prefix='video'):
-    action: VideoAction
+class ClipCallbackData(CallbackData, prefix='clip'):
+    action: ClipAction
 
 
-def _create_video_action_button(action: VideoAction) -> InlineKeyboardButton:
+def _create_clip_action_button(action: ClipAction) -> InlineKeyboardButton:
     return InlineKeyboardButton(
         text=action.title(),
-        callback_data=VideoCallback(action=action).pack(),
+        callback_data=ClipCallbackData(action=action).pack(),
     )
 
 
@@ -86,21 +86,21 @@ async def on_message_buffer_and_schedule_action_selection(message: Message, serv
 
     async def send_action_selection() -> None:
         messages = services.message_buffer.peek(user)
-        video_messages = [m for m in messages if m.video is not None]
+        clip_messages = [m for m in messages if m.video is not None]
 
-        if not video_messages:
-            await message.answer('No videos received')
+        if not clip_messages:
+            await message.answer('No clips received')
             return
 
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    _create_video_action_button(VideoAction.CANCEL),
-                    _create_video_action_button(VideoAction.NORMALIZE),
+                    _create_clip_action_button(ClipAction.CANCEL),
+                    _create_clip_action_button(ClipAction.NORMALIZE),
                 ],
             ]
         )
-        await message.answer(f'Got {len(video_messages)} videos', reply_markup=keyboard)
+        await message.answer(f'Got {len(clip_messages)} clips', reply_markup=keyboard)
 
     services.task_scheduler.schedule(
         send_action_selection,
@@ -109,8 +109,8 @@ async def on_message_buffer_and_schedule_action_selection(message: Message, serv
     )
 
 
-@router.callback_query(VideoCallback.filter())
-async def on_video_action(callback: CallbackQuery, callback_data: VideoCallback, bot: Bot, services: Services) -> None:
+@router.callback_query(ClipCallbackData.filter())
+async def on_clip_action(callback: CallbackQuery, callback_data: ClipCallbackData, bot: Bot, services: Services) -> None:
     await callback.answer()
     # In inline-mode callbacks Telegram provides `inline_message_id` instead of `message`
     if callback.message is None:
@@ -128,11 +128,11 @@ async def on_video_action(callback: CallbackQuery, callback_data: VideoCallback,
     await callback.message.edit_text(updated_text, reply_markup=None)
 
     match callback_data.action:
-        case VideoAction.NORMALIZE:
+        case ClipAction.NORMALIZE:
             message_groups = services.message_buffer.flush_grouped(user)
             cpu_semaphore = asyncio.Semaphore(1)
 
-            async def normalize_message_video(message: Message) -> bytes | None:
+            async def normalize_message_clip_volume(message: Message) -> bytes | None:
                 if message.video is None:
                     return None
 
@@ -146,11 +146,11 @@ async def on_video_action(callback: CallbackQuery, callback_data: VideoCallback,
 
             for message_group in message_groups:
                 replacement_videos = await asyncio.wait_for(
-                    asyncio.gather(*(normalize_message_video(m) for m in message_group)),
+                    asyncio.gather(*(normalize_message_clip_volume(m) for m in message_group)),
                     timeout=60,
                 )
                 await _resend_message_group(bot, user.id, message_group, replacement_videos)
 
-        case VideoAction.CANCEL:
+        case ClipAction.CANCEL:
             services.message_buffer.flush(user)
             await callback.message.answer('Canceled')
