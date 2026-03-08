@@ -9,7 +9,8 @@ from pathlib import Path
 async def normalize_video_volume(
     video_bytes: bytes,
     *,
-    loudness: float = -14.0,
+    loudness: float = -14,
+    bitrate: int = 128,
     timeout: timedelta = timedelta(seconds=30),
 ) -> bytes:
     """Normalize video audio volume with 2-pass `loudnorm`.
@@ -23,6 +24,7 @@ async def normalize_video_volume(
     Args:
         video_bytes: Original MP4 video bytes.
         loudness: Target integrated loudness in LUFS.
+        bitrate: Target audio bitrate in kbps for the re-encoded audio stream.
         timeout: Maximum time allowed for each ffmpeg subprocess run.
     """
     input_fd, input_name = tempfile.mkstemp(suffix='.mp4')
@@ -83,7 +85,7 @@ async def normalize_video_volume(
             '-c:v', 'copy',
             '-af', normalize_filter,
             '-c:a', 'aac',
-            '-b:a', '128k',
+            '-b:a', f'{bitrate}k',
             str(output_path),
         )
         await _run_ffmpeg(normalize_cmd, timeout)
