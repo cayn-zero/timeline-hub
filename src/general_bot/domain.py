@@ -36,9 +36,7 @@ async def normalize_video_volume(
     try:
         input_path.write_bytes(video_bytes)
 
-        analysis_filter = (
-            f'loudnorm=I={loudness}:TP=-1.5:LRA=7:print_format=json'
-        )
+        # Step #1: Analysis
         analysis_cmd = (
             'ffmpeg',
             '-hide_banner',
@@ -49,39 +47,20 @@ async def normalize_video_volume(
             '-threads', '1',
             '-i', str(input_path),
             '-vn',
-            '-af', analysis_filter,
+            '-af', f'loudnorm=I={loudness}:TP=-1.5:LRA=7:print_format=json',
             '-f', 'null',
             '-',
         )
-        analysis_proc = await asyncio.create_subprocess_exec(
-            *analysis_cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
-        try:
-            _, analysis_stderr = await asyncio.wait_for(
-                analysis_proc.communicate(),
-                timeout=timeout.total_seconds(),
-            )
-        except asyncio.TimeoutError:
-            analysis_proc.kill()
-            await analysis_proc.wait()
-            raise
-
-        if analysis_proc.returncode != 0:
-            stderr_text = analysis_stderr.decode(errors='replace')
-            raise RuntimeError(f'ffmpeg analysis failed: {stderr_text}')
+        analysis_stderr = await _run_ffmpeg(analysis_cmd, timeout)
 
         analysis_text = analysis_stderr.decode(errors='replace')
         json_start = analysis_text.rfind('{')
         json_end = analysis_text.rfind('}')
-
         if json_start == -1 or json_end == -1 or json_end < json_start:
             raise RuntimeError(f'ffmpeg analysis output did not contain loudnorm JSON: {analysis_text}')
-
         stats = json.loads(analysis_text[json_start:json_end + 1])
 
+        # Step #2: Normalization
         normalize_filter = (
             f'loudnorm=I={loudness}:TP=-1.5:LRA=7:'
             f'measured_I={stats["input_i"]}:'
@@ -107,28 +86,34 @@ async def normalize_video_volume(
             '-b:a', '128k',
             str(output_path),
         )
-        normalize_proc = await asyncio.create_subprocess_exec(
-            *normalize_cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
-        try:
-            _, normalize_stderr = await asyncio.wait_for(
-                normalize_proc.communicate(),
-                timeout=timeout.total_seconds(),
-            )
-        except asyncio.TimeoutError:
-            normalize_proc.kill()
-            await normalize_proc.wait()
-            raise
-
-        if normalize_proc.returncode != 0:
-            stderr_text = normalize_stderr.decode(errors='replace')
-            raise RuntimeError(f'ffmpeg normalization failed: {stderr_text}')
+        await _run_ffmpeg(normalize_cmd, timeout)
 
         return output_path.read_bytes()
 
     finally:
         input_path.unlink(missing_ok=True)
         output_path.unlink(missing_ok=True)
+
+
+async def _run_ffmpeg(cmd: tuple[str, ...], timeout: timedelta) -> bytes:
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    try:
+        _, stderr = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=timeout.total_seconds(),
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise
+
+    if proc.returncode != 0:
+        stderr_text = stderr.decode(errors='replace')
+        raise RuntimeError(f'ffmpeg failed: {stderr_text}')
+
+    return stderr
