@@ -34,4 +34,4 @@ class Settings(BaseSettings):
             raise ValueError('`BOT_TOKEN_DEV` is required in `.env` in dev mode')
         return cls(
             bot_token=bts.bot_token_dev if is_dev else bts.bot_token,
-        )  # type: ignore[call-arg]
+        )  # type: ignore[call-arg]  # pydantic-settings fills remaining fields from env at runtime; static checker false positive
