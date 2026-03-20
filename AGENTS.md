@@ -1,44 +1,252 @@
-# Project Overview
+## Telegram UI invariants
 
-This repository develops a personal Telegram bot that acts as a storage interface over S3-compatible object storage.
+These rules apply only to messages that include inline keyboards. Plain text messages must remain unmodified and must not be padded or height-normalized.
 
-The system is used primarily by a single user, but the architecture should remain naturally extensible to multiple users (e.g. per-chat logic, allowlists), without overbuilding multi-user features.
+The Telegram UI is intentionally treated as a fixed-size menu:
+- every message with buttons must render as exactly 3 text lines
+- every message with buttons must render exactly 3 rows of buttons
 
-This is not a traditional “backup” system. S3 is the source of truth, and stored objects may exist only there.
+The goal is a visually stable interface with zero layout shift between steps.
 
-## Core purpose
+More importantly, the layout is not only fixed in size, but also **structurally predictable**:
+- button positions follow consistent patterns across all menus
+- the same conceptual actions tend to appear in the same areas
+- missing options do not collapse layout — they are replaced structurally
 
-The bot allows storing, retrieving, and modifying personal data via Telegram. Current domains include:
+This allows the user to build strong spatial memory and interact very quickly without re-scanning the UI.
 
-- Music
-- Clips
-- Memories
+---
 
-These domains may have different metadata and storage rules, so the design should allow domain-specific handling rather than forcing a single rigid schema.
+### Text layout
 
-## Storage model
+Only real text lines represent content. Padding lines are artificial and exist purely for layout stability.
 
-Storage is prefix/group based.
+There are only two valid layouts:
 
-A central concept is “season”:
-- year + season number (1..5)
+#### Single-content messages
+Used for prompts and simple instructions.
 
-Additional metadata (e.g. scope, sub-season) may be used depending on the domain.
+- the real content must be placed on the 3rd line (closest to buttons)
+- the first two lines are padding
 
-Deduplication is expected but defined at the domain level.
+Layout:
+- line 1: padding
+- line 2: padding
+- line 3: real content
 
-## Interaction model
+Rationale:
+The user’s attention is naturally focused near the buttons.
 
-The primary interface is Telegram menu buttons.
+---
 
-## Design intent
+#### Context + prompt messages
+Used when showing current selection state + next action.
 
-The project is a personal storage system with:
+- the state/context must be on line 1
+- the prompt must be on line 3
+- line 2 is always padding
 
-- S3 as durable storage
-- Telegram as the control interface
-- Vlear separation between infrastructure and domain logic
-- Flexibility in how different media types are modeled
+Layout:
+- line 1: context (e.g. `Selected: ...`)
+- line 2: padding
+- line 3: prompt
+
+---
+
+### Width reservation
+
+Padding must use a single consistent mechanism tied to a configured width.
+
+Do not introduce:
+- manual spacing
+- empty lines (`\n\n`)
+- alternative padding techniques
+
+The layout system must remain deterministic and uniform.
+
+---
+
+### Selected formatting
+
+Selection state must be visually structured, not string-concatenated.
+
+Rules:
+- prefix (`Selected:`) is plain text
+- each value is emphasized individually
+- separators are plain and never emphasized
+
+Conceptually:
+- plain label
+- alternating [value, separator, value, separator...]
+
+This ensures readability and avoids visual noise.
+
+---
+
+## Button layout invariants
+
+All inline keyboards must always have exactly 3 rows.
+
+This is a strict invariant to preserve consistent menu height and interaction predictability.
+
+---
+
+### Structural consistency (core principle)
+
+The UI is designed as a **fixed spatial grid**, not a dynamic list.
+
+This means:
+- each menu has a predefined set of possible button slots
+- these slots are filled deterministically
+- unavailable options do not remove slots — they are replaced with structural placeholders
+
+As a result:
+- store and fetch menus share the same layouts
+- the user does not need to re-learn layouts between flows
+- interaction becomes faster and more automatic
+
+---
+
+### Hierarchy and positioning
+
+Buttons are arranged by role:
+
+- **Top + middle rows** → selectable options (primary interaction space)
+- **Bottom row** → navigation (Back or terminal action)
+
+The layout must feel consistent across all menus.
+
+---
+
+### Back button
+
+If present:
+- it must always occupy the entire bottom row
+- its position must never change between menus
+
+This creates a stable navigation anchor.
+
+---
+
+### Fixed option grid (first two rows)
+
+The first two rows form a **deterministic option grid**.
+
+Options are not placed left-to-right sequentially.  
+Instead, they follow a consistent spatial placement pattern optimized for usability.
+
+#### Snake layout (default)
+
+Options are placed starting from the **top-right corner**, then filled in a snake-like pattern across the first two rows:
+
+- start at top-right
+- go down
+- then move left
+- then up
+- continue alternating direction while moving left
+
+Conceptually:
+- positions closer to the top-right are easier to reach and are filled first
+- newer / more relevant / higher-priority items naturally occupy these positions
+
+Additional rule:
+- if the number of option slots is odd, the first row contains one fewer slot than the second row
+
+This layout is:
+- deterministic
+- consistent across menus
+- optimized for interaction speed
+
+---
+
+### Fixed layout across flows
+
+Menus must not change shape depending on data availability.
+
+Instead:
+- a full set of possible options is defined for each menu
+- available options are rendered normally
+- unavailable options are replaced with dummy placeholders in the same positions
+
+This ensures:
+- store and fetch share identical layouts
+- the UI does not shift when data changes
+- the user can rely on position rather than re-reading labels
+
+---
+
+### Dummy buttons
+
+Dummy buttons are purely structural.
+
+They serve two purposes:
+1. preserve layout height when there are too few buttons
+2. preserve fixed option positions when options are unavailable
+
+Strict rules:
+- they must not affect logic, parsing, or state transitions
+- their interaction must be inert
+- they must not visually compete with real actions
+
+They are part of layout, not behavior.
+
+---
+
+### Special actions
+
+Some actions (e.g. “All”) are not domain values but UI-level actions.
+
+They still participate in layout:
+- they are treated as regular options in the grid
+- they occupy fixed positions just like any other option
+- differences between flows (e.g. store vs fetch) are handled via dummy substitution
+
+This keeps layout uniform while allowing different behavior.
+
+---
+
+### Distribution principles
+
+Layouts must be:
+- deterministic
+- consistent across menus
+- stable across data states
+
+Key rules:
+- never collapse layout due to missing options
+- never insert placeholders when enough real options exist
+- always prefer structural consistency over compactness
+
+---
+
+### Directional ordering (UX rationale)
+
+The layout intentionally leverages spatial ergonomics:
+
+- top-right positions are easiest to reach and scan
+- important or recent items tend to appear there
+- movement follows predictable patterns
+
+This allows users to:
+- build muscle memory
+- interact faster without scanning entire menus
+- rely on position instead of text
+
+---
+
+## UI/domain separation
+
+UI representation may differ from domain structure, but only at rendering time.
+
+Rules:
+- domain enums and values remain authoritative
+- UI may reorder, group, or position values for usability
+- such transformations must not affect:
+  - storage
+  - parsing
+  - business logic
+
+The UI layer is a projection, not a source of truth.
 
 # Repository Agent Rules
 
@@ -53,10 +261,19 @@ The project is a personal storage system with:
 
 ## Code Style
 
-- Use modern Python 3.13+ style. Treat Python 3.13 as the baseline.
+- Target modern Python. The minimum supported Python version is defined in `pyproject.toml` (`requires-python`) and must not be duplicated here.
 - Prefer current language features over legacy compatibility patterns.
 - Do not introduce backward-compatibility constructs unless explicitly required.
 - Prefer explicit code over clever abstractions.
+
+Imports:
+
+- Use absolute imports across the entire codebase.
+- Do not use relative imports, even within the same package.
+- Import paths should always start from the top-level package (e.g. `general_bot...`).
+
+Formatting:
+
 - Use single quotes for normal strings; use triple double quotes for triple strings.
 - Use Google-style docstrings.
 
