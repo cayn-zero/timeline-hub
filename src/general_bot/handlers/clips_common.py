@@ -81,7 +81,7 @@ def create_padding_line(width: int) -> str:
     """
     if width < 2:
         raise ValueError('`width` must be >= 2')
-    return '·' + '\u00A0' * (width - 2) + '·'
+    return '·' + '\u00a0' * (width - 2) + '·'
 
 
 def selection_text(
@@ -159,10 +159,7 @@ def fixed_option_keyboard(
 ) -> InlineKeyboardMarkup:
     available = tuple(available_options)
     return selection_keyboard(
-        buttons=[
-            build_button(option) if option in available else dummy_button()
-            for option in option_universe
-        ],
+        buttons=[build_button(option) if option in available else dummy_button() for option in option_universe],
         back_button=back_button,
     )
 

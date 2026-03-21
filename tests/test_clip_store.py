@@ -4,12 +4,13 @@ import uuid
 import pytest
 
 import general_bot.services.clip_store as clip_store_module
+from general_bot.infra.s3 import S3Client, S3ObjectNotFoundError
 from general_bot.services.clip_store import (
     Clip,
     ClipGroup,
     ClipGroupNotFoundError,
-    ClipSubGroup,
     ClipStore,
+    ClipSubGroup,
     Manifest,
     ManifestCorruptedError,
     ManifestEntry,
@@ -19,7 +20,6 @@ from general_bot.services.clip_store import (
     SubSeason,
     Universe,
 )
-from general_bot.infra.s3 import S3Client, S3ObjectNotFoundError
 
 _UUID_1 = uuid.UUID('018f05c1-f1a3-7b34-8d29-1f53a1c9d0e1').hex
 _UUID_2 = uuid.UUID('018f05c1-f1a3-7b34-8d29-1f53a1c9d0e2').hex
@@ -30,7 +30,9 @@ _HASH_C = 'c' * 64
 
 
 def test_store_result_adds_counts() -> None:
-    assert StoreResult(stored_count=1, duplicate_count=2) + StoreResult(stored_count=3, duplicate_count=4) == StoreResult(
+    assert StoreResult(stored_count=1, duplicate_count=2) + StoreResult(
+        stored_count=3, duplicate_count=4
+    ) == StoreResult(
         stored_count=4,
         duplicate_count=6,
     )
@@ -643,7 +645,7 @@ async def test_store_generates_new_ids_for_same_call_repeated_unadopted_parsed_i
             'sub_season': 'A',
             'scope': 'collection',
             'order': 2,
-        }
+        },
     ]
 
 

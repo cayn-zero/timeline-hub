@@ -1,5 +1,5 @@
-from datetime import date
 from collections.abc import Sequence
+from datetime import date
 from enum import StrEnum, auto
 
 from aiogram import Bot, F, Router
@@ -8,16 +8,6 @@ from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InputMediaVideo, Message
 
-from general_bot.services.clip_store import (
-    Clip,
-    ClipGroup,
-    ClipGroupNotFoundError,
-    ClipSubGroup,
-    Scope,
-    Season,
-    SubSeason,
-    Universe,
-)
 from general_bot.handlers.clips_common import (
     ALL_SCOPES_CALLBACK_VALUE,
     BACK_CALLBACK_VALUE,
@@ -29,11 +19,11 @@ from general_bot.handlers.clips_common import (
     MenuStep,
     back_button,
     callback_message,
+    dummy_button,
     encode_sub_season,
     fixed_option_keyboard,
     format_selection_value,
     handle_stale_selection,
-    dummy_button,
     parse_scope,
     parse_season,
     parse_sub_season,
@@ -43,14 +33,23 @@ from general_bot.handlers.clips_common import (
     selection_labels,
     selection_text,
     set_flow_context,
-    single_button_keyboard,
     stacked_keyboard,
     terminate_menu,
     validate_flow_state,
     width_reserved_text,
 )
-from general_bot.settings import Settings
+from general_bot.services.clip_store import (
+    Clip,
+    ClipGroup,
+    ClipGroupNotFoundError,
+    ClipSubGroup,
+    Scope,
+    Season,
+    SubSeason,
+    Universe,
+)
 from general_bot.services.container import Services
+from general_bot.settings import Settings
 from general_bot.types import ChatId
 
 router = Router()
@@ -293,13 +292,17 @@ async def _on_fetch_select(
         case MenuStep.SEASON:
             year = data.get('year')
             season = parse_season(callback_data.value)
-            if not isinstance(year, int) or season is None or not await _show_fetch_universe_menu(
-                message=message,
-                state=state,
-                year=year,
-                season=season,
-                services=services,
-                settings=settings,
+            if (
+                not isinstance(year, int)
+                or season is None
+                or not await _show_fetch_universe_menu(
+                    message=message,
+                    state=state,
+                    year=year,
+                    season=season,
+                    services=services,
+                    settings=settings,
+                )
             ):
                 await handle_stale_selection(message=message, state=state)
 
@@ -695,7 +698,6 @@ async def _send_fetch_scopes(
             clip_sub_group=ClipSubGroup(sub_season=sub_season, scope=scope),
             batch_size=10,
         ):
-
             await _send_stored_clip_batch(bot=bot, chat_id=chat_id, clips=batch)
 
     await bot.send_message(chat_id=chat_id, text='Done')
@@ -751,11 +753,7 @@ def _fetch_season_options(
     *,
     year: int,
 ) -> list[Season]:
-    return [
-        season
-        for season in Season
-        if any(group.year == year and group.season is season for group in groups)
-    ]
+    return [season for season in Season if any(group.year == year and group.season is season for group in groups)]
 
 
 def _fetch_universe_options(
@@ -773,9 +771,7 @@ def _fetch_universe_options(
 
 def _fetch_sub_season_options(sub_groups: Sequence[ClipSubGroup]) -> list[SubSeason]:
     return [
-        sub_season
-        for sub_season in SubSeason
-        if any(sub_group.sub_season is sub_season for sub_group in sub_groups)
+        sub_season for sub_season in SubSeason if any(sub_group.sub_season is sub_season for sub_group in sub_groups)
     ]
 
 

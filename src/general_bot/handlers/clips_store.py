@@ -25,6 +25,7 @@ from general_bot.handlers.clips_common import (
     callback_message,
     create_padding_line,
     download_video_bytes,
+    fixed_option_keyboard,
     format_selection_value,
     format_store_summary,
     handle_stale_selection,
@@ -34,20 +35,25 @@ from general_bot.handlers.clips_common import (
     parse_universe,
     parse_year,
     selected_text,
-    fixed_option_keyboard,
-    selection_keyboard,
     selection_labels,
     selection_text,
     set_flow_context,
-    split_sub_season_buttons,
     stacked_keyboard,
     validate_flow_state,
-    width_reserved_text,
 )
-from general_bot.settings import Settings
-from general_bot.services.clip_store import Clip, ClipGroup, ClipSubGroup, Scope, Season, StoreResult, SubSeason, Universe
+from general_bot.services.clip_store import (
+    Clip,
+    ClipGroup,
+    ClipSubGroup,
+    Scope,
+    Season,
+    StoreResult,
+    SubSeason,
+    Universe,
+)
 from general_bot.services.container import Services
 from general_bot.services.message_buffer import MessageGroup
+from general_bot.settings import Settings
 from general_bot.types import ChatId
 
 router = Router()
@@ -322,12 +328,16 @@ async def _on_store_select(
         case MenuStep.SEASON:
             year = data.get('year')
             season = parse_season(callback_data.value)
-            if not isinstance(year, int) or season is None or not await _show_store_universe_menu(
-                message=message,
-                state=state,
-                settings=settings,
-                year=year,
-                season=season,
+            if (
+                not isinstance(year, int)
+                or season is None
+                or not await _show_store_universe_menu(
+                    message=message,
+                    state=state,
+                    settings=settings,
+                    year=year,
+                    season=season,
+                )
             ):
                 await handle_stale_selection(message=message, state=state)
 
@@ -340,13 +350,13 @@ async def _on_store_select(
                 or not isinstance(season, Season)
                 or universe is None
                 or not await _show_store_sub_season_menu(
-                message=message,
-                state=state,
-                settings=settings,
-                year=year,
-                season=season,
-                universe=universe,
-            )
+                    message=message,
+                    state=state,
+                    settings=settings,
+                    year=year,
+                    season=season,
+                    universe=universe,
+                )
             ):
                 await handle_stale_selection(message=message, state=state)
 
@@ -361,14 +371,14 @@ async def _on_store_select(
                 or not isinstance(universe, Universe)
                 or sub_season is UNSET
                 or not await _show_store_scope_menu(
-                message=message,
-                state=state,
-                settings=settings,
-                year=year,
-                season=season,
-                universe=universe,
-                sub_season=sub_season,
-            )
+                    message=message,
+                    state=state,
+                    settings=settings,
+                    year=year,
+                    season=season,
+                    universe=universe,
+                    sub_season=sub_season,
+                )
             ):
                 await handle_stale_selection(message=message, state=state)
 

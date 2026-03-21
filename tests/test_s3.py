@@ -6,7 +6,7 @@ import pytest
 from botocore.exceptions import ClientError
 
 import general_bot.infra.s3 as s3_module
-from general_bot.infra.s3 import S3Config, S3ObjectNotFoundError, S3Client
+from general_bot.infra.s3 import S3Client, S3Config, S3ObjectNotFoundError
 
 
 def _client_error(code: str, operation: str) -> ClientError:
@@ -26,11 +26,11 @@ class _FakeBody:
 
     async def read(self, size: int = -1) -> bytes:
         if size == -1:
-            out = self._data[self._pos:]
+            out = self._data[self._pos :]
             self._pos = len(self._data)
             return out
 
-        out = self._data[self._pos:self._pos + size]
+        out = self._data[self._pos : self._pos + size]
         self._pos += len(out)
         return out
 

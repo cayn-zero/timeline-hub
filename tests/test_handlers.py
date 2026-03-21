@@ -17,8 +17,8 @@ from general_bot.handlers.clips_common import (
     StoreClipFlow,
     create_padding_line,
     format_store_summary,
-    selection_labels,
     selected_text,
+    selection_labels,
 )
 from general_bot.handlers.clips_fetch import (
     FetchCallbackData,
@@ -26,20 +26,19 @@ from general_bot.handlers.clips_fetch import (
     FetchEntryCallbackData,
     _send_fetch_scopes,
     _send_stored_clip_batch,
-    _show_fetch_season_menu,
     _show_fetch_scope_menu,
+    _show_fetch_season_menu,
     _show_fetch_sub_season_menu,
     _show_fetch_universe_menu,
     on_clips,
     on_fetch_entry,
     on_fetch_menu,
 )
-from general_bot.handlers.core import on_dummy_button
 from general_bot.handlers.clips_store import (
     ClipAction,
     StoreCallbackData,
-    _show_store_season_menu,
     _show_store_scope_menu,
+    _show_store_season_menu,
     _show_store_sub_season_menu,
     _show_store_universe_menu,
     _store_year_options,
@@ -47,7 +46,17 @@ from general_bot.handlers.clips_store import (
     on_message_buffer_and_schedule_clip_action_selection,
     on_store_menu,
 )
-from general_bot.services.clip_store import Clip, ClipGroup, ClipSubGroup, Scope, Season, StoreResult, SubSeason, Universe
+from general_bot.handlers.core import on_dummy_button
+from general_bot.services.clip_store import (
+    Clip,
+    ClipGroup,
+    ClipSubGroup,
+    Scope,
+    Season,
+    StoreResult,
+    SubSeason,
+    Universe,
+)
 from general_bot.services.container import Services
 from general_bot.services.message_buffer import ChatMessageBuffer
 
@@ -245,7 +254,7 @@ def test_create_padding_line_returns_two_visible_anchors_for_minimum_width() -> 
 
 
 def test_create_padding_line_returns_nbsp_padding_between_anchors() -> None:
-    assert create_padding_line(4) == '·\u00A0\u00A0·'
+    assert create_padding_line(4) == '·\u00a0\u00a0·'
 
 
 def test_create_padding_line_rejects_width_below_two() -> None:
@@ -261,11 +270,14 @@ def test_selected_text_with_leading_text_keeps_plain_text_layout_and_segmented_b
         Bold('Store'),
     ).as_kwargs()
 
-    assert selected_text(
-        selected='Store',
-        leading_text='Got 1 clip',
-        message_width=6,
-    ) == expected
+    assert (
+        selected_text(
+            selected='Store',
+            leading_text='Got 1 clip',
+            message_width=6,
+        )
+        == expected
+    )
 
 
 def test_handlers_package_router_imports_cleanly() -> None:
@@ -493,7 +505,11 @@ async def test_fetch_back_from_season_keeps_year_slots_and_top_right_priority() 
     )
     reply_markup = message.edit_text.await_args.kwargs['reply_markup']
     _assert_three_rows(reply_markup)
-    assert _keyboard_rows(reply_markup) == [[DUMMY_BUTTON_TEXT, DUMMY_BUTTON_TEXT], [DUMMY_BUTTON_TEXT, '2024', '2025'], ['Back']]
+    assert _keyboard_rows(reply_markup) == [
+        [DUMMY_BUTTON_TEXT, DUMMY_BUTTON_TEXT],
+        [DUMMY_BUTTON_TEXT, '2024', '2025'],
+        ['Back'],
+    ]
     assert state.current_state == FetchClipFlow.year.state
 
 
@@ -528,7 +544,11 @@ async def test_on_fetch_entry_opens_year_menu_with_fetch_selected() -> None:
     )
     reply_markup = message.edit_text.await_args.kwargs['reply_markup']
     _assert_three_rows(reply_markup)
-    assert _keyboard_rows(reply_markup) == [[DUMMY_BUTTON_TEXT, DUMMY_BUTTON_TEXT], [DUMMY_BUTTON_TEXT, '2024', '2025'], ['Back']]
+    assert _keyboard_rows(reply_markup) == [
+        [DUMMY_BUTTON_TEXT, DUMMY_BUTTON_TEXT],
+        [DUMMY_BUTTON_TEXT, '2024', '2025'],
+        ['Back'],
+    ]
     assert state.current_state == FetchClipFlow.year.state
 
 
@@ -664,7 +684,11 @@ async def test_fetch_scope_menu_uses_fixed_scope_grid_with_dummy_slots() -> None
 
     reply_markup_single = message_single.edit_text.await_args.kwargs['reply_markup']
     _assert_three_rows(reply_markup_single)
-    assert _keyboard_rows(reply_markup_single) == [[DUMMY_BUTTON_TEXT, 'All'], ['Collection', DUMMY_BUTTON_TEXT], ['Back']]
+    assert _keyboard_rows(reply_markup_single) == [
+        [DUMMY_BUTTON_TEXT, 'All'],
+        ['Collection', DUMMY_BUTTON_TEXT],
+        ['Back'],
+    ]
 
 
 @pytest.mark.asyncio
@@ -735,7 +759,11 @@ async def test_fetch_sub_season_menu_skips_only_when_none_is_only_option() -> No
     assert state_none_only.current_state == FetchClipFlow.scope.state
     reply_markup_none_only = message_none_only.edit_text.await_args.kwargs['reply_markup']
     _assert_three_rows(reply_markup_none_only)
-    assert _keyboard_rows(reply_markup_none_only) == [[DUMMY_BUTTON_TEXT, 'All'], ['Collection', DUMMY_BUTTON_TEXT], ['Back']]
+    assert _keyboard_rows(reply_markup_none_only) == [
+        [DUMMY_BUTTON_TEXT, 'All'],
+        ['Collection', DUMMY_BUTTON_TEXT],
+        ['Back'],
+    ]
 
     message_with_extra = _fake_message(message_id=76)
     state_with_extra = _FakeState()
@@ -756,7 +784,11 @@ async def test_fetch_sub_season_menu_skips_only_when_none_is_only_option() -> No
     assert state_with_extra.current_state == FetchClipFlow.sub_season.state
     reply_markup_with_extra = message_with_extra.edit_text.await_args.kwargs['reply_markup']
     _assert_three_rows(reply_markup_with_extra)
-    assert _keyboard_rows(reply_markup_with_extra) == [[DUMMY_BUTTON_TEXT, 'None'], [DUMMY_BUTTON_TEXT, DUMMY_BUTTON_TEXT, 'A'], ['Back']]
+    assert _keyboard_rows(reply_markup_with_extra) == [
+        [DUMMY_BUTTON_TEXT, 'None'],
+        [DUMMY_BUTTON_TEXT, DUMMY_BUTTON_TEXT, 'A'],
+        ['Back'],
+    ]
 
 
 @pytest.mark.asyncio
@@ -809,7 +841,11 @@ async def test_fetch_season_menu_uses_store_slot_universe_with_dummy_substitutio
     _assert_format_kwargs(message.edit_text.await_args.kwargs, expected)
     reply_markup = message.edit_text.await_args.kwargs['reply_markup']
     _assert_three_rows(reply_markup)
-    assert _keyboard_rows(reply_markup) == [[DUMMY_BUTTON_TEXT, '1'], [DUMMY_BUTTON_TEXT, '3', DUMMY_BUTTON_TEXT], ['Back']]
+    assert _keyboard_rows(reply_markup) == [
+        [DUMMY_BUTTON_TEXT, '1'],
+        [DUMMY_BUTTON_TEXT, '3', DUMMY_BUTTON_TEXT],
+        ['Back'],
+    ]
 
 
 @pytest.mark.asyncio
@@ -848,7 +884,11 @@ async def test_fetch_season_menu_limits_current_year_to_store_boundary_and_uses_
     _assert_format_kwargs(message.edit_text.await_args.kwargs, expected)
     reply_markup = message.edit_text.await_args.kwargs['reply_markup']
     _assert_three_rows(reply_markup)
-    assert _keyboard_rows(reply_markup) == [[DUMMY_BUTTON_TEXT, '1'], [DUMMY_BUTTON_TEXT, DUMMY_BUTTON_TEXT, DUMMY_BUTTON_TEXT], ['Back']]
+    assert _keyboard_rows(reply_markup) == [
+        [DUMMY_BUTTON_TEXT, '1'],
+        [DUMMY_BUTTON_TEXT, DUMMY_BUTTON_TEXT, DUMMY_BUTTON_TEXT],
+        ['Back'],
+    ]
 
 
 @pytest.mark.asyncio
@@ -898,13 +938,19 @@ async def test_store_scope_selection_aggregates_results_and_sends_exact_summary(
     )
 
     buffer = ChatMessageBuffer()
-    buffer.append(_fake_message(chat_id=77, message_id=1, video=_fake_video(file_id='f1', file_name='one.mp4')), chat_id=77)
     buffer.append(
-        _fake_message(chat_id=77, message_id=2, video=_fake_video(file_id='f2', file_name='two.mp4'), media_group_id='g1'),
+        _fake_message(chat_id=77, message_id=1, video=_fake_video(file_id='f1', file_name='one.mp4')), chat_id=77
+    )
+    buffer.append(
+        _fake_message(
+            chat_id=77, message_id=2, video=_fake_video(file_id='f2', file_name='two.mp4'), media_group_id='g1'
+        ),
         chat_id=77,
     )
     buffer.append(
-        _fake_message(chat_id=77, message_id=3, video=_fake_video(file_id='f3', file_name='three.mp4'), media_group_id='g1'),
+        _fake_message(
+            chat_id=77, message_id=3, video=_fake_video(file_id='f3', file_name='three.mp4'), media_group_id='g1'
+        ),
         chat_id=77,
     )
     buffer.append(_fake_message(chat_id=77, message_id=4, text='note'), chat_id=77)

@@ -198,7 +198,8 @@ class S3Client:
             raise
 
     async def put_stream(
-        self, key: Key,
+        self,
+        key: Key,
         stream: BinaryIO,
         *,
         content_type: S3ContentType | str | None = None,

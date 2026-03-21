@@ -164,14 +164,13 @@ class Manifest:
 
     def next_order(self, *, sub_season: SubSeason, scope: Scope) -> int:
         """Return the next logical order within a sub-group."""
-        return max(
-            (
-                entry.order
-                for entry in self._entries
-                if entry.scope is scope and entry.sub_season is sub_season
-            ),
-            default=0,
-        ) + 1
+        return (
+            max(
+                (entry.order for entry in self._entries if entry.scope is scope and entry.sub_season is sub_season),
+                default=0,
+            )
+            + 1
+        )
 
     def to_list(self) -> list[dict[str, Any]]:
         """Convert the manifest into its JSON-compatible shape."""
@@ -229,7 +228,8 @@ class Manifest:
             order_key = (scope, sub_season, order)
             if order_key in seen_orders:
                 raise ValueError(
-                    f'duplicate manifest order for scope={scope.value} sub_season={_format_sub_season(sub_season)} order={order}'
+                    f'duplicate manifest order for scope={scope.value} '
+                    f'sub_season={_format_sub_season(sub_season)} order={order}'
                 )
 
             seen_ids.add(clip_id)
@@ -631,18 +631,25 @@ class ClipStore:
         cmd = (
             'ffmpeg',
             '-hide_banner',
-            '-loglevel', 'error',
+            '-loglevel',
+            'error',
             '-nostats',
             '-nostdin',
-            '-threads', '1',
-            '-i', str(input_path),
-            '-map', '0:v:0',
-            '-c:v', 'copy',
+            '-threads',
+            '1',
+            '-i',
+            str(input_path),
+            '-map',
+            '0:v:0',
+            '-c:v',
+            'copy',
             '-an',
             '-sn',
             '-dn',
-            '-bsf:v', 'h264_mp4toannexb',
-            '-f', 'h264',
+            '-bsf:v',
+            'h264_mp4toannexb',
+            '-f',
+            'h264',
             'pipe:1',
         )
         proc = await asyncio.create_subprocess_exec(

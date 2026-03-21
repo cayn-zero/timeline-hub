@@ -42,15 +42,20 @@ async def normalize_video_volume(
         analysis_cmd = (
             'ffmpeg',
             '-hide_banner',
-            '-loglevel', 'info',
+            '-loglevel',
+            'info',
             '-nostats',
             '-nostdin',
             '-y',
-            '-threads', '1',
-            '-i', str(input_path),
+            '-threads',
+            '1',
+            '-i',
+            str(input_path),
             '-vn',
-            '-af', f'loudnorm=I={loudness}:TP=-1.5:LRA=7:print_format=json',
-            '-f', 'null',
+            '-af',
+            f'loudnorm=I={loudness}:TP=-1.5:LRA=7:print_format=json',
+            '-f',
+            'null',
             '-',
         )
         analysis_stderr = await _run_ffmpeg(analysis_cmd, timeout)
@@ -60,7 +65,7 @@ async def normalize_video_volume(
         json_end = analysis_text.rfind('}')
         if json_start == -1 or json_end == -1 or json_end < json_start:
             raise RuntimeError(f'ffmpeg analysis output did not contain loudnorm JSON: {analysis_text}')
-        stats = json.loads(analysis_text[json_start:json_end + 1])
+        stats = json.loads(analysis_text[json_start : json_end + 1])
 
         # Step #2: Normalization
         normalize_filter = (
@@ -76,16 +81,23 @@ async def normalize_video_volume(
         normalize_cmd = (
             'ffmpeg',
             '-hide_banner',
-            '-loglevel', 'error',
+            '-loglevel',
+            'error',
             '-nostats',
             '-nostdin',
             '-y',
-            '-threads', '1',
-            '-i', str(input_path),
-            '-c:v', 'copy',
-            '-af', normalize_filter,
-            '-c:a', 'aac',
-            '-b:a', f'{bitrate}k',
+            '-threads',
+            '1',
+            '-i',
+            str(input_path),
+            '-c:v',
+            'copy',
+            '-af',
+            normalize_filter,
+            '-c:a',
+            'aac',
+            '-b:a',
+            f'{bitrate}k',
             str(output_path),
         )
         await _run_ffmpeg(normalize_cmd, timeout)
