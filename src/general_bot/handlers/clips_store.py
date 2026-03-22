@@ -14,19 +14,13 @@ from aiogram.utils.formatting import Bold, Text
 from general_bot.domain import normalize_video_volume
 from general_bot.handlers.clips_common import (
     ALL_SCOPES_CALLBACK_VALUE,
-    BACK_CALLBACK_VALUE,
     FLOW_STORE,
     STORE_STATE_BY_STEP,
-    UNSET,
     MenuAction,
     MenuStep,
-    StoreClipFlow,
-    back_button,
     callback_message,
     create_padding_line,
     download_video_bytes,
-    fixed_option_keyboard,
-    format_selection_value,
     format_store_summary,
     handle_stale_selection,
     parse_scope,
@@ -35,11 +29,23 @@ from general_bot.handlers.clips_common import (
     parse_universe,
     parse_year,
     selected_text,
-    selection_labels,
     selection_text,
-    set_flow_context,
     stacked_keyboard,
-    validate_flow_state,
+)
+from general_bot.handlers.clips_flow import (
+    FlowMenuDefinition,
+    flow_selection_labels,
+    scope_option_callback_value,
+    scope_option_text,
+    selected_year,
+    selected_year_season,
+    selected_year_season_universe,
+    selected_year_season_universe_sub_season,
+    show_fixed_option_menu,
+    show_or_stale,
+    store_allowed_seasons,
+    validate_menu_flow_state,
+    year_option_universe,
 )
 from general_bot.services.clip_store import (
     Clip,
@@ -73,6 +79,18 @@ class StoreCallbackData(CallbackData, prefix='clip_store'):
     action: MenuAction
     step: MenuStep
     value: str
+
+
+def _pack_store_menu_callback(action: MenuAction, step: MenuStep, value: str) -> str:
+    return StoreCallbackData(action=action, step=step, value=value).pack()
+
+
+_STORE_FLOW = FlowMenuDefinition(
+    mode=FLOW_STORE,
+    flow_label='Store',
+    state_by_step=STORE_STATE_BY_STEP,
+    pack_callback=_pack_store_menu_callback,
+)
 
 
 @router.message(F.chat.type == ChatType.PRIVATE)
@@ -174,11 +192,11 @@ async def on_store_menu(
         await state.clear()
         return
 
-    if not await validate_flow_state(
+    if not await validate_menu_flow_state(
         message=message,
         state=state,
-        expected_mode=FLOW_STORE,
-        expected_state=STORE_STATE_BY_STEP[callback_data.step],
+        flow=_STORE_FLOW,
+        step=callback_data.step,
     ):
         return
 
@@ -254,53 +272,56 @@ async def _on_store_back(
             )
 
         case MenuStep.SEASON:
-            if not await _show_store_year_menu(message=message, state=state, settings=settings):
-                await handle_stale_selection(message=message, state=state)
+            await show_or_stale(
+                show_menu=_show_store_year_menu,
+                message=message,
+                state=state,
+                settings=settings,
+            )
 
         case MenuStep.UNIVERSE:
-            year = data.get('year')
-            if not isinstance(year, int):
+            year = selected_year(data)
+            if year is None:
                 await handle_stale_selection(message=message, state=state)
                 return
-            if not await _show_store_season_menu(
+            await show_or_stale(
+                show_menu=_show_store_season_menu,
                 message=message,
                 state=state,
                 settings=settings,
                 year=year,
-            ):
-                await handle_stale_selection(message=message, state=state)
+            )
 
         case MenuStep.SUB_SEASON:
-            year = data.get('year')
-            season = data.get('season')
-            if not isinstance(year, int) or not isinstance(season, Season):
+            selection = selected_year_season(data)
+            if selection is None:
                 await handle_stale_selection(message=message, state=state)
                 return
-            if not await _show_store_universe_menu(
+            year, season = selection
+            await show_or_stale(
+                show_menu=_show_store_universe_menu,
                 message=message,
                 state=state,
                 settings=settings,
                 year=year,
                 season=season,
-            ):
-                await handle_stale_selection(message=message, state=state)
+            )
 
         case MenuStep.SCOPE:
-            year = data.get('year')
-            season = data.get('season')
-            universe = data.get('universe')
-            if not isinstance(year, int) or not isinstance(season, Season) or not isinstance(universe, Universe):
+            selection = selected_year_season_universe(data)
+            if selection is None:
                 await handle_stale_selection(message=message, state=state)
                 return
-            if not await _show_store_sub_season_menu(
+            year, season, universe = selection
+            await show_or_stale(
+                show_menu=_show_store_sub_season_menu,
                 message=message,
                 state=state,
                 settings=settings,
                 year=year,
                 season=season,
                 universe=universe,
-            ):
-                await handle_stale_selection(message=message, state=state)
+            )
 
 
 async def _on_store_select(
@@ -317,90 +338,79 @@ async def _on_store_select(
     match callback_data.step:
         case MenuStep.YEAR:
             year = parse_year(callback_data.value)
-            if year is None or not await _show_store_season_menu(
+            if year is None:
+                await handle_stale_selection(message=message, state=state)
+                return
+            await show_or_stale(
+                show_menu=_show_store_season_menu,
                 message=message,
                 state=state,
                 settings=settings,
                 year=year,
-            ):
-                await handle_stale_selection(message=message, state=state)
+            )
 
         case MenuStep.SEASON:
-            year = data.get('year')
+            year = selected_year(data)
             season = parse_season(callback_data.value)
-            if (
-                not isinstance(year, int)
-                or season is None
-                or not await _show_store_universe_menu(
-                    message=message,
-                    state=state,
-                    settings=settings,
-                    year=year,
-                    season=season,
-                )
-            ):
-                await handle_stale_selection(message=message, state=state)
-
-        case MenuStep.UNIVERSE:
-            year = data.get('year')
-            season = data.get('season')
-            universe = parse_universe(callback_data.value)
-            if (
-                not isinstance(year, int)
-                or not isinstance(season, Season)
-                or universe is None
-                or not await _show_store_sub_season_menu(
-                    message=message,
-                    state=state,
-                    settings=settings,
-                    year=year,
-                    season=season,
-                    universe=universe,
-                )
-            ):
-                await handle_stale_selection(message=message, state=state)
-
-        case MenuStep.SUB_SEASON:
-            year = data.get('year')
-            season = data.get('season')
-            universe = data.get('universe')
-            sub_season = parse_sub_season(callback_data.value)
-            if (
-                not isinstance(year, int)
-                or not isinstance(season, Season)
-                or not isinstance(universe, Universe)
-                or not isinstance(sub_season, SubSeason)
-                or not await _show_store_scope_menu(
-                    message=message,
-                    state=state,
-                    settings=settings,
-                    year=year,
-                    season=season,
-                    universe=universe,
-                    sub_season=sub_season,
-                )
-            ):
-                await handle_stale_selection(message=message, state=state)
-
-        case MenuStep.SCOPE:
-            year = data.get('year')
-            season = data.get('season')
-            universe = data.get('universe')
-            sub_season = data.get('sub_season', UNSET)
-            scope = parse_scope(callback_data.value)
-            if (
-                not isinstance(year, int)
-                or not isinstance(season, Season)
-                or not isinstance(universe, Universe)
-                or not isinstance(sub_season, SubSeason)
-                or scope is None
-            ):
+            if year is None or season is None:
                 await handle_stale_selection(message=message, state=state)
                 return
+            await show_or_stale(
+                show_menu=_show_store_universe_menu,
+                message=message,
+                state=state,
+                settings=settings,
+                year=year,
+                season=season,
+            )
+
+        case MenuStep.UNIVERSE:
+            selection = selected_year_season(data)
+            universe = parse_universe(callback_data.value)
+            if selection is None or universe is None:
+                await handle_stale_selection(message=message, state=state)
+                return
+            year, season = selection
+            await show_or_stale(
+                show_menu=_show_store_sub_season_menu,
+                message=message,
+                state=state,
+                settings=settings,
+                year=year,
+                season=season,
+                universe=universe,
+            )
+
+        case MenuStep.SUB_SEASON:
+            selection = selected_year_season_universe(data)
+            sub_season = parse_sub_season(callback_data.value)
+            if selection is None or not isinstance(sub_season, SubSeason):
+                await handle_stale_selection(message=message, state=state)
+                return
+            year, season, universe = selection
+            await show_or_stale(
+                show_menu=_show_store_scope_menu,
+                message=message,
+                state=state,
+                settings=settings,
+                year=year,
+                season=season,
+                universe=universe,
+                sub_season=sub_season,
+            )
+
+        case MenuStep.SCOPE:
+            selection = selected_year_season_universe_sub_season(data)
+            scope = parse_scope(callback_data.value)
+            if selection is None or scope is None:
+                await handle_stale_selection(message=message, state=state)
+                return
+            year, season, universe, sub_season = selection
 
             await message.edit_text(
                 **selection_text(
-                    selected=_store_selection_labels(
+                    selected=flow_selection_labels(
+                        _STORE_FLOW,
                         year=year,
                         season=season,
                         universe=universe,
@@ -434,28 +444,17 @@ async def _show_store_year_menu(
     if not years:
         return False
 
-    await set_flow_context(
+    await show_fixed_option_menu(
+        flow=_STORE_FLOW,
+        message=message,
         state=state,
-        mode=FLOW_STORE,
-        menu_message_id=message.message_id,
-        fsm_state=StoreClipFlow.year,
-    )
-    await message.edit_text(
-        **selection_text(
-            selected=_store_selection_labels(),
-            prompt='Select year:',
-            message_width=settings.message_width,
-        ),
-        reply_markup=fixed_option_keyboard(
-            option_universe=list(reversed(years)),
-            available_options=years,
-            build_button=lambda year: _store_menu_button(
-                step=MenuStep.YEAR,
-                value=str(year),
-                text=str(year),
-            ),
-            back_button=_store_back_button(step=MenuStep.YEAR),
-        ),
+        message_width=settings.message_width,
+        step=MenuStep.YEAR,
+        prompt='Select year:',
+        option_universe=list(reversed(years)),
+        available_options=years,
+        option_value=str,
+        option_text=str,
     )
     return True
 
@@ -471,29 +470,18 @@ async def _show_store_season_menu(
         return False
     seasons = _store_season_options(year=year, today=date.today())
 
-    await set_flow_context(
+    await show_fixed_option_menu(
+        flow=_STORE_FLOW,
+        message=message,
         state=state,
-        mode=FLOW_STORE,
-        menu_message_id=message.message_id,
-        fsm_state=StoreClipFlow.season,
+        message_width=settings.message_width,
+        step=MenuStep.SEASON,
+        prompt='Select season:',
         year=year,
-    )
-    await message.edit_text(
-        **selection_text(
-            prompt='Select season:',
-            selected=_store_selection_labels(year=year),
-            message_width=settings.message_width,
-        ),
-        reply_markup=fixed_option_keyboard(
-            option_universe=list(Season),
-            available_options=seasons,
-            build_button=lambda season: _store_menu_button(
-                step=MenuStep.SEASON,
-                value=str(int(season)),
-                text=str(int(season)),
-            ),
-            back_button=_store_back_button(step=MenuStep.SEASON),
-        ),
+        option_universe=list(Season),
+        available_options=seasons,
+        option_value=lambda season: str(int(season)),
+        option_text=lambda season: str(int(season)),
     )
     return True
 
@@ -506,30 +494,19 @@ async def _show_store_universe_menu(
     year: int,
     season: Season,
 ) -> bool:
-    await set_flow_context(
+    await show_fixed_option_menu(
+        flow=_STORE_FLOW,
+        message=message,
         state=state,
-        mode=FLOW_STORE,
-        menu_message_id=message.message_id,
-        fsm_state=StoreClipFlow.universe,
+        message_width=settings.message_width,
+        step=MenuStep.UNIVERSE,
+        prompt='Select universe:',
         year=year,
         season=season,
-    )
-    await message.edit_text(
-        **selection_text(
-            prompt='Select universe:',
-            selected=_store_selection_labels(year=year, season=season),
-            message_width=settings.message_width,
-        ),
-        reply_markup=fixed_option_keyboard(
-            option_universe=tuple(Universe),
-            available_options=tuple(Universe),
-            build_button=lambda universe: _store_menu_button(
-                step=MenuStep.UNIVERSE,
-                value=universe.value,
-                text=format_selection_value(universe),
-            ),
-            back_button=_store_back_button(step=MenuStep.UNIVERSE),
-        ),
+        option_universe=tuple(Universe),
+        available_options=tuple(Universe),
+        option_value=lambda universe: universe.value,
+        option_text=lambda universe: universe.value.title(),
     )
     return True
 
@@ -543,31 +520,20 @@ async def _show_store_sub_season_menu(
     season: Season,
     universe: Universe,
 ) -> bool:
-    await set_flow_context(
+    await show_fixed_option_menu(
+        flow=_STORE_FLOW,
+        message=message,
         state=state,
-        mode=FLOW_STORE,
-        menu_message_id=message.message_id,
-        fsm_state=StoreClipFlow.sub_season,
+        message_width=settings.message_width,
+        step=MenuStep.SUB_SEASON,
+        prompt='Select sub-season:',
         year=year,
         season=season,
         universe=universe,
-    )
-    await message.edit_text(
-        **selection_text(
-            prompt='Select sub-season:',
-            selected=_store_selection_labels(year=year, season=season, universe=universe),
-            message_width=settings.message_width,
-        ),
-        reply_markup=fixed_option_keyboard(
-            option_universe=tuple(SubSeason),
-            available_options=tuple(SubSeason),
-            build_button=lambda sub_season: _store_menu_button(
-                step=MenuStep.SUB_SEASON,
-                value=sub_season.value,
-                text=format_selection_value(sub_season),
-            ),
-            back_button=_store_back_button(step=MenuStep.SUB_SEASON),
-        ),
+        option_universe=tuple(SubSeason),
+        available_options=tuple(SubSeason),
+        option_value=lambda sub_season: sub_season.value,
+        option_text=lambda sub_season: sub_season.value.title(),
     )
     return True
 
@@ -582,37 +548,21 @@ async def _show_store_scope_menu(
     universe: Universe,
     sub_season: SubSeason,
 ) -> bool:
-    await set_flow_context(
+    await show_fixed_option_menu(
+        flow=_STORE_FLOW,
+        message=message,
         state=state,
-        mode=FLOW_STORE,
-        menu_message_id=message.message_id,
-        fsm_state=StoreClipFlow.scope,
+        message_width=settings.message_width,
+        step=MenuStep.SCOPE,
+        prompt='Select scope:',
         year=year,
         season=season,
         universe=universe,
         sub_season=sub_season,
-    )
-    await message.edit_text(
-        **selection_text(
-            prompt='Select scope:',
-            selected=_store_selection_labels(
-                year=year,
-                season=season,
-                universe=universe,
-                sub_season=sub_season,
-            ),
-            message_width=settings.message_width,
-        ),
-        reply_markup=fixed_option_keyboard(
-            option_universe=(ALL_SCOPES_CALLBACK_VALUE, *Scope),
-            available_options=tuple(Scope),
-            build_button=lambda option: _store_menu_button(
-                step=MenuStep.SCOPE,
-                value=_scope_option_callback_value(option),
-                text=_scope_option_text(option),
-            ),
-            back_button=_store_back_button(step=MenuStep.SCOPE),
-        ),
+        option_universe=(ALL_SCOPES_CALLBACK_VALUE, *Scope),
+        available_options=tuple(Scope),
+        option_value=scope_option_callback_value,
+        option_text=scope_option_text,
     )
     return True
 
@@ -667,16 +617,11 @@ async def _message_group_to_clips(
 
 
 def _store_year_options(*, current_year: int, min_year: int) -> list[int]:
-    if current_year < min_year:
-        return []
-    return list(range(min_year, current_year + 1))
+    return year_option_universe(current_year=current_year, min_year=min_year)
 
 
 def _store_season_options(*, year: int, today: date) -> list[Season]:
-    if year != today.year:
-        return list(Season)
-    max_season = Season.from_month(today.month)
-    return [season for season in Season if season <= max_season]
+    return store_allowed_seasons(year=year, today=today)
 
 
 def _telegram_clip_filename(message: Message) -> str:
@@ -784,63 +729,6 @@ def _create_clip_action_button(action: ClipAction) -> InlineKeyboardButton:
         text=action.title(),
         callback_data=ClipActionCallbackData(action=action).pack(),
     )
-
-
-def _store_menu_button(*, step: MenuStep, value: str, text: str) -> InlineKeyboardButton:
-    return InlineKeyboardButton(
-        text=text,
-        callback_data=StoreCallbackData(
-            action=MenuAction.SELECT,
-            step=step,
-            value=value,
-        ).pack(),
-    )
-
-
-def _store_back_button(*, step: MenuStep) -> InlineKeyboardButton:
-    return back_button(
-        callback_data=StoreCallbackData(
-            action=MenuAction.BACK,
-            step=step,
-            value=BACK_CALLBACK_VALUE,
-        ).pack(),
-    )
-
-
-def _store_selection_labels(
-    *,
-    year: int | object = UNSET,
-    season: Season | object = UNSET,
-    universe: Universe | object = UNSET,
-    sub_season: SubSeason | object = UNSET,
-    scope: Scope | str | object = UNSET,
-) -> list[str]:
-    return [
-        'Store',
-        *selection_labels(
-            year=year,
-            season=season,
-            universe=universe,
-            sub_season=sub_season,
-            scope=scope,
-        ),
-    ]
-
-
-def _scope_option_callback_value(option: Scope | str) -> str:
-    if option == ALL_SCOPES_CALLBACK_VALUE:
-        return ALL_SCOPES_CALLBACK_VALUE
-    if not isinstance(option, Scope):
-        raise ValueError(f'Unsupported scope option: {option!r}')
-    return option.value
-
-
-def _scope_option_text(option: Scope | str) -> str:
-    if option == ALL_SCOPES_CALLBACK_VALUE:
-        return 'All'
-    if not isinstance(option, Scope):
-        raise ValueError(f'Unsupported scope option: {option!r}')
-    return format_selection_value(option)
 
 
 def _store_summary_kwargs(result: StoreResult) -> dict[str, Any]:
