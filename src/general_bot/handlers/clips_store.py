@@ -369,7 +369,7 @@ async def _on_store_select(
                 not isinstance(year, int)
                 or not isinstance(season, Season)
                 or not isinstance(universe, Universe)
-                or sub_season is UNSET
+                or not isinstance(sub_season, SubSeason)
                 or not await _show_store_scope_menu(
                     message=message,
                     state=state,
@@ -392,7 +392,7 @@ async def _on_store_select(
                 not isinstance(year, int)
                 or not isinstance(season, Season)
                 or not isinstance(universe, Universe)
-                or sub_season is UNSET
+                or not isinstance(sub_season, SubSeason)
                 or scope is None
             ):
                 await handle_stale_selection(message=message, state=state)
@@ -608,8 +608,8 @@ async def _show_store_scope_menu(
             available_options=tuple(Scope),
             build_button=lambda option: _store_menu_button(
                 step=MenuStep.SCOPE,
-                value=ALL_SCOPES_CALLBACK_VALUE if option == ALL_SCOPES_CALLBACK_VALUE else option.value,
-                text='All' if option == ALL_SCOPES_CALLBACK_VALUE else format_selection_value(option),
+                value=_scope_option_callback_value(option),
+                text=_scope_option_text(option),
             ),
             back_button=_store_back_button(step=MenuStep.SCOPE),
         ),
@@ -758,12 +758,18 @@ async def _resend_message_group(
 
     media = []
     for message, replacement_video in zip(message_group, replacement_videos, strict=True):
+        video = message.video
+        if video is None:
+            raise ValueError('Message group must contain only videos')
         media.append(
             InputMediaVideo(
                 media=(
-                    message.video.file_id
+                    video.file_id
                     if replacement_video is None
-                    else BufferedInputFile(replacement_video, filename=message.video.file_name)
+                    else BufferedInputFile(
+                        replacement_video,
+                        filename=video.file_name or _telegram_clip_filename(message),
+                    )
                 ),
                 caption=message.caption,
                 caption_entities=message.caption_entities,
@@ -819,6 +825,22 @@ def _store_selection_labels(
             scope=scope,
         ),
     ]
+
+
+def _scope_option_callback_value(option: Scope | str) -> str:
+    if option == ALL_SCOPES_CALLBACK_VALUE:
+        return ALL_SCOPES_CALLBACK_VALUE
+    if not isinstance(option, Scope):
+        raise ValueError(f'Unsupported scope option: {option!r}')
+    return option.value
+
+
+def _scope_option_text(option: Scope | str) -> str:
+    if option == ALL_SCOPES_CALLBACK_VALUE:
+        return 'All'
+    if not isinstance(option, Scope):
+        raise ValueError(f'Unsupported scope option: {option!r}')
+    return format_selection_value(option)
 
 
 def _store_summary_kwargs(result: StoreResult) -> dict[str, Any]:

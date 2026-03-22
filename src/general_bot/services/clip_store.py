@@ -42,7 +42,7 @@ class Season(IntEnum):
     S5 = 5
 
     @classmethod
-    def from_month(cls, month: int) -> Self:
+    def from_month(cls, month: int) -> Season:
         """Return the season that contains the provided month."""
         match month:
             case 1 | 2:

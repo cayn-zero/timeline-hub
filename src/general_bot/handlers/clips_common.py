@@ -5,7 +5,7 @@ from typing import Any, TypeVar
 from aiogram import Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.formatting import Bold, Text
 
 from general_bot.services.clip_store import Scope, Season, StoreResult, SubSeason, Universe
@@ -68,7 +68,11 @@ STORE_STATE_BY_STEP = {
 
 async def download_video_bytes(bot: Bot, *, file_id: str) -> bytes:
     file = await bot.get_file(file_id)
+    if file.file_path is None:
+        raise ValueError(f'Telegram file {file_id} has no downloadable path')
     buffer = await bot.download_file(file.file_path)
+    if buffer is None:
+        raise RuntimeError(f'Telegram file download returned no content for {file_id}')
     return buffer.read()
 
 
@@ -365,7 +369,7 @@ def format_store_summary(result: StoreResult) -> str:
 
 def callback_message(callback: CallbackQuery) -> Message | None:
     message = callback.message
-    if message is None:
+    if message is None or isinstance(message, InaccessibleMessage):
         return None
     return message
 
@@ -517,8 +521,8 @@ def split_year_buttons(buttons: Sequence[InlineKeyboardButton]) -> _TwoRowButton
         place_in_top = not place_in_top
 
     return _TwoRowButtons(
-        top_row=reversed(top_row_newest_first),
-        bottom_row=reversed(bottom_row_newest_first),
+        top_row=list(reversed(top_row_newest_first)),
+        bottom_row=list(reversed(bottom_row_newest_first)),
     )
 
 

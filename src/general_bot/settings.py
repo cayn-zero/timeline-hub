@@ -1,21 +1,10 @@
 from datetime import timedelta
 from typing import Any, Self
 
-from pydantic import BaseModel, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from general_bot.types import UserId
-
-
-class _BotTokenSettings(BaseSettings):
-    bot_token: SecretStr
-    bot_token_dev: SecretStr | None = None
-
-    model_config = SettingsConfigDict(
-        env_file='.env',
-        frozen=True,
-        extra='ignore',
-    )
 
 
 class S3Settings(BaseModel):
@@ -26,7 +15,27 @@ class S3Settings(BaseModel):
     secret_access_key: SecretStr
 
 
-class Settings(BaseSettings):
+class _EnvSettings(BaseSettings):
+    bot_token: SecretStr | None = None
+    bot_token_dev: SecretStr | None = None
+    superuser_ids: set[UserId] | None = None
+    user_ids: set[UserId] = Field(default_factory=set)
+    s3: S3Settings | None = None
+    forward_batch_timeout: timedelta = timedelta(seconds=0.25)
+    message_width: int = 80
+    min_clip_year: int = 2022
+    normalization_loudness: float = -14
+    normalization_bitrate: int = 128
+
+    model_config = SettingsConfigDict(
+        env_file='.env',
+        frozen=True,
+        extra='ignore',
+        env_nested_delimiter='__',
+    )
+
+
+class Settings(BaseModel):
     # Telegram bot
     bot_token: SecretStr
     superuser_ids: set[UserId]
@@ -47,21 +56,36 @@ class Settings(BaseSettings):
     normalization_loudness: float = -14
     normalization_bitrate: int = 128
 
-    model_config = SettingsConfigDict(
-        env_file='.env',
+    model_config = ConfigDict(
         frozen=True,
-        extra='ignore',
-        env_nested_delimiter='__',
     )
 
     @classmethod
     def load(cls, is_dev: bool) -> Self:
-        bot_token_settings = _BotTokenSettings()
-        if is_dev and bot_token_settings.bot_token_dev is None:
-            raise ValueError('`BOT_TOKEN_DEV` is required in `.env` in dev mode')
+        env_settings = _EnvSettings()
+        if env_settings.bot_token is None:
+            raise ValueError('`BOT_TOKEN` is required in `.env`')
+        if env_settings.superuser_ids is None:
+            raise ValueError('`SUPERUSER_IDS` is required in `.env`')
+        if env_settings.s3 is None:
+            raise ValueError('`S3__*` settings are required in `.env`')
+        if is_dev:
+            if env_settings.bot_token_dev is None:
+                raise ValueError('`BOT_TOKEN_DEV` is required in `.env` in dev mode')
+            bot_token = env_settings.bot_token_dev
+        else:
+            bot_token = env_settings.bot_token
         return cls(
-            bot_token=bot_token_settings.bot_token_dev if is_dev else bot_token_settings.bot_token,
-        )  # type: ignore[call-arg]  # pydantic-settings fills remaining fields from env at runtime; static checker false positive
+            bot_token=bot_token,
+            superuser_ids=env_settings.superuser_ids,
+            user_ids=env_settings.user_ids,
+            s3=env_settings.s3,
+            forward_batch_timeout=env_settings.forward_batch_timeout,
+            message_width=env_settings.message_width,
+            min_clip_year=env_settings.min_clip_year,
+            normalization_loudness=env_settings.normalization_loudness,
+            normalization_bitrate=env_settings.normalization_bitrate,
+        )
 
     @model_validator(mode='before')
     @classmethod

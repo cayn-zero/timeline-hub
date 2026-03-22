@@ -2,11 +2,12 @@ import argparse
 import asyncio
 import logging
 import sys
+from collections.abc import Awaitable, Callable
 from typing import Any
 
-from aiogram import Bot, Dispatcher
+from aiogram import BaseMiddleware, Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Update, User
+from aiogram.types import TelegramObject, User
 from loguru import logger
 
 from general_bot.handlers.router import router as handlers_router
@@ -16,7 +17,31 @@ from general_bot.services.clip_store import ClipStore
 from general_bot.services.container import Services
 from general_bot.services.message_buffer import ChatMessageBuffer
 from general_bot.settings import Settings
-from general_bot.types import Data, Handler, UserId
+from general_bot.types import UserId
+
+
+class _AllowlistMiddleware(BaseMiddleware):
+    def __init__(self, *, user_ids: set[UserId]) -> None:
+        self._user_ids = user_ids
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        user: User | None = data.get('event_from_user')
+        if user is None:
+            return None
+        if user.id not in self._user_ids:
+            logger.info(
+                'User {} (@{} {!r}) attempting to use bot',
+                user.id,
+                user.username or '',
+                user.full_name,
+            )
+            return None
+        return await handler(event, data)
 
 
 def run() -> None:
@@ -59,21 +84,7 @@ async def _main(settings: Settings) -> None:
         dp['settings'] = settings
         dp['on_failure'] = on_failure_stop
         dp.include_router(handlers_router)
-
-        @dp.update.middleware()
-        async def enforce_allowlist(handler: Handler, update: Update, data: Data) -> Any:
-            user: User | None = data.get('event_from_user')
-            if user is None:
-                return None
-            if user.id not in settings.user_ids:
-                logger.info(
-                    'User {} (@{} {!r}) attempting to use bot',
-                    user.id,
-                    user.username or '',
-                    user.full_name,
-                )
-                return None
-            return await handler(update, data)
+        dp.update.middleware(_AllowlistMiddleware(user_ids=settings.user_ids))
 
         logger.info('Starting bot')
         await dp.start_polling(bot, polling_timeout=30)
