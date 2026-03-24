@@ -593,7 +593,7 @@ should be assumed breaking unless clearly proven otherwise.
 
 Subjects must:
 
-- be lowercase
+- be lowercase by default
 - use imperative mood
 - be ≤72 characters
 - describe the system-level change
@@ -647,6 +647,40 @@ Better:
 - `fix(handlers): restrict clip flows to private chats`
 
 Implementation details should appear in the commit body, not the subject.
+
+---
+
+### User-facing semantic entities
+
+When a commit is primarily about a literal user-facing action, mode, flow,
+or other named product/API concept, prefer naming that entity explicitly in
+the subject.
+
+In those cases:
+- write the entity in its actual UI/API form
+- use the exact user-facing casing of the entity (typically sentence case)
+- wrap that entity in backticks
+
+This is a preference, not a strict rule for every commit.
+
+Use it when it materially improves clarity by distinguishing:
+- a literal named action from generic English
+- a real UI/API concept from a loose description
+- the end-user-visible entity affected by the change
+
+Examples:
+
+- `feat(handlers): add \`Reconcile\` action for stored clips`
+- `fix(handlers): keep \`Fetch raw\` selection in raw mode`
+- `refactor(handlers): route \`Store\` and \`Reconcile\` through shared intake flow`
+
+Do not convert entities to Title Case; preserve their real UI/API casing.
+
+Do not force this style for generic words or internal concepts that are not
+meaningfully user-facing.
+
+Prefer plain wording when the change is not centered on a specific named
+entity.
 
 ---
 
