@@ -492,6 +492,7 @@ async def test_store_entry_places_newest_year_in_top_right_slot() -> None:
     assert _keyboard_rows(reply_markup) == [['2023', '2026'], ['2022', '2024', '2025'], ['Back']]
     services.clip_store.list_groups.assert_not_awaited()
     services.clip_store.list_sub_groups.assert_not_awaited()
+    assert state.data['buffer_version'] == 0
 
 
 @pytest.mark.asyncio
@@ -528,6 +529,7 @@ async def test_reconcile_entry_derives_group_and_opens_sub_season_menu() -> None
     )
     services = _services(clip_store=clip_store, buffer=buffer)
     settings = _settings()
+    pre_flush_buffer_version = services.chat_message_buffer.version(1)
 
     await on_intake_action(
         callback,
@@ -546,7 +548,99 @@ async def test_reconcile_entry_derives_group_and_opens_sub_season_menu() -> None
     assert state.current_state == ReconcileClipFlow.sub_season.state
     assert state.data['clip_group'] == ClipGroup(year=2025, season=Season.S1, universe=Universe.WEST)
     assert state.data['filename_batches'] == [['one.mp4'], ['two.mp4', 'three.mp4']]
-    assert services.chat_message_buffer.peek(1) == []
+    assert state.data['buffer_version'] == pre_flush_buffer_version
+    assert [message.message_id for message in services.chat_message_buffer.peek(1)] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_entry_prefers_current_buffered_clips_over_stored_reconcile_state() -> None:
+    message = _fake_message(text='Got 1 clip', chat_id=77, message_id=35)
+    callback = _fake_callback(message)
+    state = _FakeState()
+    await state.update_data(
+        clip_group=ClipGroup(year=2024, season=Season.S1, universe=Universe.WEST),
+        filename_batches=[['old-one.mp4']],
+        buffer_version=0,
+    )
+    bot = AsyncMock()
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(chat_id=77, message_id=1, video=_fake_video(file_id='f1', file_name='new-one.mp4')),
+        chat_id=77,
+    )
+    buffer.append(
+        _fake_message(
+            chat_id=77,
+            message_id=2,
+            video=_fake_video(file_id='f2', file_name='new-two.mp4'),
+            media_group_id='g1',
+        ),
+        chat_id=77,
+    )
+    buffer.append(
+        _fake_message(
+            chat_id=77,
+            message_id=3,
+            video=_fake_video(file_id='f3', file_name='new-three.mp4'),
+            media_group_id='g1',
+        ),
+        chat_id=77,
+    )
+    clip_store = SimpleNamespace(
+        derive_group=AsyncMock(return_value=ClipGroup(year=2025, season=Season.S2, universe=Universe.EAST))
+    )
+    services = _services(clip_store=clip_store, buffer=buffer)
+
+    await on_intake_action(
+        callback,
+        SimpleNamespace(action=IntakeAction.RECONCILE),
+        bot,
+        services,
+        _settings(),
+        state,
+    )
+
+    clip_store.derive_group.assert_awaited_once_with([['new-one.mp4'], ['new-two.mp4', 'new-three.mp4']])
+    _assert_format_kwargs(
+        message.edit_text.await_args.kwargs,
+        _selected_kwargs('Reconcile', '2025', '2', 'East', prompt='Select sub-season:', message_width=35),
+    )
+    assert state.data['clip_group'] == ClipGroup(year=2025, season=Season.S2, universe=Universe.EAST)
+    assert state.data['filename_batches'] == [['new-one.mp4'], ['new-two.mp4', 'new-three.mp4']]
+    assert [message.message_id for message in services.chat_message_buffer.peek(77)] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_entry_reuses_stored_state_when_current_buffer_has_no_filename_batches() -> None:
+    message = _fake_message(text='Got 1 clip', chat_id=77, message_id=36)
+    callback = _fake_callback(message)
+    state = _FakeState()
+    await state.update_data(
+        clip_group=ClipGroup(year=2025, season=Season.S1, universe=Universe.WEST),
+        filename_batches=[['one.mp4'], ['two.mp4', 'three.mp4']],
+        buffer_version=0,
+    )
+    buffer = ChatMessageBuffer()
+    buffer.append(_fake_message(chat_id=77, message_id=1, text='note'), chat_id=77)
+    buffer.append(_fake_message(chat_id=77, message_id=2, text='ignored', media_group_id='g1'), chat_id=77)
+    clip_store = SimpleNamespace(derive_group=AsyncMock(side_effect=AssertionError('must not re-derive')))
+    services = _services(clip_store=clip_store, buffer=buffer)
+
+    await on_intake_action(
+        callback,
+        SimpleNamespace(action=IntakeAction.RECONCILE),
+        AsyncMock(),
+        services,
+        _settings(),
+        state,
+    )
+
+    clip_store.derive_group.assert_not_awaited()
+    _assert_format_kwargs(
+        message.edit_text.await_args.kwargs,
+        _selected_kwargs('Reconcile', '2025', '1', 'West', prompt='Select sub-season:', message_width=35),
+    )
+    assert state.data['filename_batches'] == [['one.mp4'], ['two.mp4', 'three.mp4']]
 
 
 @pytest.mark.asyncio
@@ -600,6 +694,49 @@ async def test_reconcile_entry_ignores_non_video_buffered_messages() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reconcile_sub_season_selection_becomes_stale_when_buffer_changes_after_entry() -> None:
+    message = _fake_message(text='Got 1 clip', chat_id=77, message_id=37)
+    callback = _fake_callback(message)
+    state = _FakeState()
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(chat_id=77, message_id=1, video=_fake_video(file_id='f1', file_name='one.mp4')),
+        chat_id=77,
+    )
+    clip_store = SimpleNamespace(
+        derive_group=AsyncMock(return_value=ClipGroup(year=2025, season=Season.S1, universe=Universe.WEST))
+    )
+    services = _services(clip_store=clip_store, buffer=buffer)
+
+    await on_intake_action(
+        callback,
+        SimpleNamespace(action=IntakeAction.RECONCILE),
+        AsyncMock(),
+        services,
+        _settings(),
+        state,
+    )
+
+    buffer.append(
+        _fake_message(chat_id=77, message_id=2, video=_fake_video(file_id='f2', file_name='two.mp4')),
+        chat_id=77,
+    )
+    await on_intake_menu(
+        callback,
+        IntakeCallbackData(action=MenuAction.SELECT, step=MenuStep.SUB_SEASON, value=SubSeason.NONE.value),
+        AsyncMock(),
+        services,
+        _settings(),
+        state,
+    )
+
+    assert message.edit_text.await_args_list[-1].args == ('Selection is no longer available',)
+    assert message.edit_text.await_args_list[-1].kwargs == {
+        'reply_markup': None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_reconcile_back_from_scope_returns_to_sub_season_menu() -> None:
     message = _fake_message(text='Select scope:', message_id=32)
     callback = _fake_callback(message)
@@ -611,6 +748,7 @@ async def test_reconcile_back_from_scope_returns_to_sub_season_menu() -> None:
         sub_season=SubSeason.NONE,
         clip_group=ClipGroup(year=2025, season=Season.S1, universe=Universe.WEST),
         filename_batches=[['one.mp4'], ['two.mp4', 'three.mp4']],
+        buffer_version=0,
     )
     services = _services(clip_store=SimpleNamespace(), buffer=ChatMessageBuffer())
 
@@ -641,6 +779,7 @@ async def test_reconcile_back_from_sub_season_returns_to_clip_action_menu() -> N
         menu_message_id=33,
         clip_group=ClipGroup(year=2025, season=Season.S1, universe=Universe.WEST),
         filename_batches=[['one.mp4'], ['two.mp4', 'three.mp4']],
+        buffer_version=0,
     )
     services = _services(
         clip_store=SimpleNamespace(derive_group=AsyncMock(side_effect=AssertionError('must not re-derive'))),
@@ -1225,15 +1364,6 @@ async def test_store_scope_selection_aggregates_results_and_sends_exact_summary(
     callback = _fake_callback(message)
     state = _FakeState()
     await state.set_state(StoreClipFlow.scope)
-    await state.update_data(
-        mode='store',
-        menu_message_id=50,
-        year=2025,
-        season=Season.S1,
-        universe=Universe.WEST,
-        sub_season=SubSeason.NONE,
-    )
-
     buffer = ChatMessageBuffer()
     buffer.append(
         _fake_message(chat_id=77, message_id=1, video=_fake_video(file_id='f1', file_name='one.mp4')), chat_id=77
@@ -1251,6 +1381,15 @@ async def test_store_scope_selection_aggregates_results_and_sends_exact_summary(
         chat_id=77,
     )
     buffer.append(_fake_message(chat_id=77, message_id=4, text='note'), chat_id=77)
+    await state.update_data(
+        mode='store',
+        menu_message_id=50,
+        year=2025,
+        season=Season.S1,
+        universe=Universe.WEST,
+        sub_season=SubSeason.NONE,
+        buffer_version=buffer.version(77),
+    )
 
     clip_store = SimpleNamespace(
         store=AsyncMock(
@@ -1307,12 +1446,61 @@ async def test_store_scope_selection_aggregates_results_and_sends_exact_summary(
 
 
 @pytest.mark.asyncio
+async def test_store_scope_selection_preserves_missing_telegram_filename_behavior() -> None:
+    message = _fake_message(text='Select scope:', chat_id=77, message_id=50)
+    callback = _fake_callback(message)
+    state = _FakeState()
+    await state.set_state(StoreClipFlow.scope)
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(chat_id=77, message_id=1, video=_fake_video(file_id='f1', file_name=None)),
+        chat_id=77,
+    )
+    await state.update_data(
+        mode='store',
+        menu_message_id=50,
+        year=2025,
+        season=Season.S1,
+        universe=Universe.WEST,
+        sub_season=SubSeason.NONE,
+        buffer_version=buffer.version(77),
+    )
+
+    clip_store = SimpleNamespace(
+        store=AsyncMock(return_value=StoreResult(stored_count=1, duplicate_count=0)),
+        compact=AsyncMock(),
+    )
+    services = _services(clip_store=clip_store, buffer=buffer)
+
+    bot = AsyncMock()
+    bot.get_file.return_value = SimpleNamespace(file_path='path-1')
+    bot.download_file.return_value = BytesIO(b'one')
+
+    await on_intake_menu(
+        callback,
+        IntakeCallbackData(action=MenuAction.SELECT, step=MenuStep.SCOPE, value=Scope.COLLECTION.value),
+        bot,
+        services,
+        _settings(),
+        state,
+    )
+
+    stored_clips = clip_store.store.await_args.args[0]
+    assert [clip.filename for clip in stored_clips] == ['telegram-77-1.mp4']
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('scope', [Scope.EXTRA, Scope.SOURCE])
 async def test_store_scope_selection_compacts_extra_and_source_batches(scope: Scope) -> None:
     message = _fake_message(text='Select scope:', chat_id=77, message_id=51)
     callback = _fake_callback(message)
     state = _FakeState()
     await state.set_state(StoreClipFlow.scope)
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(chat_id=77, message_id=1, video=_fake_video(file_id='f1', file_name='one.mp4')),
+        chat_id=77,
+    )
     await state.update_data(
         mode='store',
         menu_message_id=51,
@@ -1320,12 +1508,7 @@ async def test_store_scope_selection_compacts_extra_and_source_batches(scope: Sc
         season=Season.S1,
         universe=Universe.WEST,
         sub_season=SubSeason.NONE,
-    )
-
-    buffer = ChatMessageBuffer()
-    buffer.append(
-        _fake_message(chat_id=77, message_id=1, video=_fake_video(file_id='f1', file_name='one.mp4')),
-        chat_id=77,
+        buffer_version=buffer.version(77),
     )
 
     clip_store = SimpleNamespace(
@@ -1360,6 +1543,11 @@ async def test_store_scope_selection_does_not_compact_when_everything_is_duplica
     callback = _fake_callback(message)
     state = _FakeState()
     await state.set_state(StoreClipFlow.scope)
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(chat_id=77, message_id=1, video=_fake_video(file_id='f1', file_name='one.mp4')),
+        chat_id=77,
+    )
     await state.update_data(
         mode='store',
         menu_message_id=52,
@@ -1367,12 +1555,7 @@ async def test_store_scope_selection_does_not_compact_when_everything_is_duplica
         season=Season.S1,
         universe=Universe.WEST,
         sub_season=SubSeason.NONE,
-    )
-
-    buffer = ChatMessageBuffer()
-    buffer.append(
-        _fake_message(chat_id=77, message_id=1, video=_fake_video(file_id='f1', file_name='one.mp4')),
-        chat_id=77,
+        buffer_version=buffer.version(77),
     )
 
     clip_store = SimpleNamespace(
@@ -1403,16 +1586,40 @@ async def test_reconcile_scope_selection_uses_stored_filename_batches_without_do
     callback = _fake_callback(message)
     state = _FakeState()
     await state.set_state(ReconcileClipFlow.scope)
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(chat_id=77, message_id=1, video=_fake_video(file_id='f1', file_name='one.mp4')),
+        chat_id=77,
+    )
+    buffer.append(
+        _fake_message(
+            chat_id=77,
+            message_id=2,
+            video=_fake_video(file_id='f2', file_name='two.mp4'),
+            media_group_id='g1',
+        ),
+        chat_id=77,
+    )
+    buffer.append(
+        _fake_message(
+            chat_id=77,
+            message_id=3,
+            video=_fake_video(file_id='f3', file_name='three.mp4'),
+            media_group_id='g1',
+        ),
+        chat_id=77,
+    )
     await state.update_data(
         mode=FLOW_RECONCILE,
         menu_message_id=53,
         sub_season=SubSeason.NONE,
         clip_group=ClipGroup(year=2025, season=Season.S1, universe=Universe.WEST),
         filename_batches=[['one.mp4'], ['two.mp4', 'three.mp4']],
+        buffer_version=buffer.version(77),
     )
 
     clip_store = SimpleNamespace(reconcile=AsyncMock(return_value=ReconcileResult(updated=3, removed=1)))
-    services = _services(clip_store=clip_store, buffer=ChatMessageBuffer())
+    services = _services(clip_store=clip_store, buffer=buffer)
 
     bot = AsyncMock()
     await on_intake_menu(
@@ -1431,6 +1638,7 @@ async def test_reconcile_scope_selection_uses_stored_filename_batches_without_do
     )
     bot.get_file.assert_not_awaited()
     bot.download_file.assert_not_awaited()
+    assert services.chat_message_buffer.peek(77) == []
     message.answer.assert_awaited_once_with(
         **Text(
             'Updated: ',
@@ -1440,6 +1648,135 @@ async def test_reconcile_scope_selection_uses_stored_filename_batches_without_do
             Bold('1'),
         ).as_kwargs()
     )
+
+
+@pytest.mark.asyncio
+async def test_store_scope_selection_becomes_stale_when_buffer_version_changes() -> None:
+    message = _fake_message(text='Select scope:', chat_id=77, message_id=57)
+    callback = _fake_callback(message)
+    state = _FakeState()
+    await state.set_state(StoreClipFlow.scope)
+
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(chat_id=77, message_id=1, video=_fake_video(file_id='f1', file_name='one.mp4')),
+        chat_id=77,
+    )
+    await state.update_data(
+        mode='store',
+        menu_message_id=57,
+        year=2025,
+        season=Season.S1,
+        universe=Universe.WEST,
+        sub_season=SubSeason.NONE,
+        buffer_version=buffer.version(77),
+    )
+    buffer.append(
+        _fake_message(chat_id=77, message_id=2, video=_fake_video(file_id='f2', file_name='two.mp4')),
+        chat_id=77,
+    )
+
+    clip_store = SimpleNamespace(store=AsyncMock(), compact=AsyncMock())
+    services = _services(clip_store=clip_store, buffer=buffer)
+
+    await on_intake_menu(
+        callback,
+        IntakeCallbackData(action=MenuAction.SELECT, step=MenuStep.SCOPE, value=Scope.COLLECTION.value),
+        AsyncMock(),
+        services,
+        _settings(),
+        state,
+    )
+
+    message.edit_text.assert_awaited_once_with('Selection is no longer available', reply_markup=None)
+    clip_store.store.assert_not_awaited()
+    clip_store.compact.assert_not_awaited()
+    assert state.current_state is None
+    assert state.clear_count == 1
+
+
+@pytest.mark.asyncio
+async def test_store_back_becomes_stale_when_buffer_version_changes() -> None:
+    message = _fake_message(text='Select season:', chat_id=77, message_id=58)
+    callback = _fake_callback(message)
+    state = _FakeState()
+    await state.set_state(StoreClipFlow.season)
+
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(chat_id=77, message_id=1, video=_fake_video(file_id='f1', file_name='one.mp4')),
+        chat_id=77,
+    )
+    await state.update_data(
+        mode='store',
+        menu_message_id=58,
+        year=2025,
+        buffer_version=buffer.version(77),
+    )
+    buffer.append(
+        _fake_message(chat_id=77, message_id=2, video=_fake_video(file_id='f2', file_name='two.mp4')),
+        chat_id=77,
+    )
+
+    services = _services(clip_store=_NoListClipStore(), buffer=buffer)
+
+    await on_intake_menu(
+        callback,
+        IntakeCallbackData(action=MenuAction.BACK, step=MenuStep.SEASON, value='back'),
+        AsyncMock(),
+        services,
+        _settings(),
+        state,
+    )
+
+    message.edit_text.assert_awaited_once_with('Selection is no longer available', reply_markup=None)
+    services.clip_store.list_groups.assert_not_awaited()
+    services.clip_store.list_sub_groups.assert_not_awaited()
+    assert state.current_state is None
+    assert state.clear_count == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_scope_selection_becomes_stale_when_buffer_version_changes() -> None:
+    message = _fake_message(text='Select scope:', chat_id=77, message_id=59)
+    callback = _fake_callback(message)
+    state = _FakeState()
+    await state.set_state(ReconcileClipFlow.scope)
+
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(chat_id=77, message_id=1, video=_fake_video(file_id='f1', file_name='one.mp4')),
+        chat_id=77,
+    )
+    await state.update_data(
+        mode=FLOW_RECONCILE,
+        menu_message_id=59,
+        sub_season=SubSeason.NONE,
+        clip_group=ClipGroup(year=2025, season=Season.S1, universe=Universe.WEST),
+        filename_batches=[['one.mp4']],
+        buffer_version=buffer.version(77),
+    )
+    buffer.append(
+        _fake_message(chat_id=77, message_id=2, video=_fake_video(file_id='f2', file_name='two.mp4')),
+        chat_id=77,
+    )
+
+    clip_store = SimpleNamespace(reconcile=AsyncMock())
+    services = _services(clip_store=clip_store, buffer=buffer)
+
+    await on_intake_menu(
+        callback,
+        IntakeCallbackData(action=MenuAction.SELECT, step=MenuStep.SCOPE, value=Scope.COLLECTION.value),
+        AsyncMock(),
+        services,
+        _settings(),
+        state,
+    )
+
+    message.edit_text.assert_awaited_once_with('Selection is no longer available', reply_markup=None)
+    clip_store.reconcile.assert_not_awaited()
+    assert state.current_state is None
+    assert state.clear_count == 1
 
 
 @pytest.mark.asyncio
@@ -1476,10 +1813,17 @@ async def test_reconcile_entry_skips_text_only_buffered_groups() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('file_name', [None, ''])
-async def test_reconcile_entry_raises_on_missing_video_filename(file_name: str | None) -> None:
+async def test_reconcile_entry_with_missing_video_filename_fails_cleanly_without_reusing_saved_state(
+    file_name: str | None,
+) -> None:
     message = _fake_message(text='Got 1 clip', chat_id=77, message_id=56)
     callback = _fake_callback(message)
     state = _FakeState()
+    await state.update_data(
+        clip_group=ClipGroup(year=2024, season=Season.S1, universe=Universe.WEST),
+        filename_batches=[['old-one.mp4']],
+        buffer_version=0,
+    )
 
     buffer = ChatMessageBuffer()
     buffer.append(
@@ -1494,18 +1838,18 @@ async def test_reconcile_entry_raises_on_missing_video_filename(file_name: str |
     clip_store = SimpleNamespace(derive_group=AsyncMock())
     services = _services(clip_store=clip_store, buffer=buffer)
 
-    with pytest.raises(ValueError, match='have a filename'):
-        await on_intake_action(
-            callback,
-            SimpleNamespace(action=IntakeAction.RECONCILE),
-            AsyncMock(),
-            services,
-            _settings(),
-            state,
-        )
+    await on_intake_action(
+        callback,
+        SimpleNamespace(action=IntakeAction.RECONCILE),
+        AsyncMock(),
+        services,
+        _settings(),
+        state,
+    )
 
     clip_store.derive_group.assert_not_awaited()
-    message.answer.assert_not_awaited()
+    message.answer.assert_awaited_once_with("Can't reconcile not stored")
+    message.edit_text.assert_not_awaited()
     assert services.chat_message_buffer.peek(77) != []
 
 

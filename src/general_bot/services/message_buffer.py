@@ -22,9 +22,11 @@ class ChatMessageBuffer:
 
     def __init__(self) -> None:
         self._messages: dict[ChatId, Messages] = {}
+        self._versions: dict[ChatId, int] = {}
 
     def append(self, message: Message, *, chat_id: ChatId) -> None:
         self._messages.setdefault(chat_id, []).append(message)
+        self._bump_version(chat_id)
 
     def peek(self, chat_id: ChatId) -> Messages:
         return list(self._messages.get(chat_id, []))
@@ -33,12 +35,21 @@ class ChatMessageBuffer:
         """Peek and group messages by contiguous `media_group_id`."""
         return self._group(self.peek(chat_id))
 
+    def version(self, chat_id: ChatId) -> int:
+        return self._versions.get(chat_id, 0)
+
     def flush(self, chat_id: ChatId) -> Messages:
-        return self._messages.pop(chat_id, [])
+        messages = self._messages.pop(chat_id, [])
+        if messages:
+            self._bump_version(chat_id)
+        return messages
 
     def flush_grouped(self, chat_id: ChatId) -> MessageGroups:
         """Flush and group messages by contiguous `media_group_id`."""
         return self._group(self.flush(chat_id))
+
+    def _bump_version(self, chat_id: ChatId) -> None:
+        self._versions[chat_id] = self.version(chat_id) + 1
 
     @staticmethod
     def _group(messages: Messages) -> MessageGroups:

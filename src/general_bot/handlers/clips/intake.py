@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from datetime import date
 from enum import StrEnum, auto
 from typing import Any
@@ -42,7 +43,6 @@ from general_bot.handlers.clips.flow import (
     selected_year_season_universe,
     selected_year_season_universe_sub_season,
     show_fixed_option_menu,
-    show_or_stale,
     store_allowed_seasons,
     validate_menu_flow_state,
     year_option_universe,
@@ -69,6 +69,8 @@ from general_bot.types import ChatId
 
 router = Router()
 _TELEGRAM_MEDIA_GROUP_LIMIT = 10
+_BUFFER_VERSION_KEY = 'buffer_version'
+type IntakeShowMenu = Callable[..., Awaitable[bool]]
 
 
 class IntakeAction(StrEnum):
@@ -162,6 +164,42 @@ async def on_intake_action(
             services.chat_message_buffer.flush(message.chat.id)
 
         case IntakeAction.RECONCILE:
+            if _has_pending_reconcile_videos(
+                services=services,
+                chat_id=message.chat.id,
+            ):
+                try:
+                    filename_batches = _pending_reconcile_filename_batches(
+                        services=services,
+                        chat_id=message.chat.id,
+                    )
+                except ValueError:
+                    await message.answer("Can't reconcile not stored")
+                    return
+
+                try:
+                    clip_group = await services.clip_store.derive_group(filename_batches)
+                except DuplicateFilenamesError:
+                    await message.answer("Can't reconcile duplicates")
+                    return
+                except InvalidFilenamesError, UnknownClipsError:
+                    await message.answer("Can't reconcile not stored")
+                    return
+                except MixedClipGroupsError:
+                    await message.answer("Can't reconcile mixed groups")
+                    return
+
+                buffer_version = services.chat_message_buffer.version(message.chat.id)
+                await _show_reconcile_sub_season_menu(
+                    message=message,
+                    state=state,
+                    settings=settings,
+                    clip_group=clip_group,
+                    filename_batches=filename_batches,
+                    buffer_version=buffer_version,
+                )
+                return
+
             stored_data = await state.get_data()
             stored_clip_group = _reconcile_clip_group_from_state(stored_data)
             stored_filename_batches = _reconcile_filename_batches_from_state(stored_data)
@@ -175,32 +213,14 @@ async def on_intake_action(
                 )
                 return
 
-            filename_batches = _message_groups_to_filenames(services.chat_message_buffer.peek_grouped(message.chat.id))
-            try:
-                clip_group = await services.clip_store.derive_group(filename_batches)
-            except DuplicateFilenamesError:
-                await message.answer("Can't reconcile duplicates")
-                return
-            except InvalidFilenamesError, UnknownClipsError:
-                await message.answer("Can't reconcile not stored")
-                return
-            except MixedClipGroupsError:
-                await message.answer("Can't reconcile mixed groups")
-                return
-
-            services.chat_message_buffer.flush(message.chat.id)
-            await _show_reconcile_sub_season_menu(
-                message=message,
-                state=state,
-                settings=settings,
-                clip_group=clip_group,
-                filename_batches=filename_batches,
-            )
+            await handle_stale_selection(message=message, state=state)
 
         case IntakeAction.STORE:
-            await _show_store_year_menu(
+            await _show_intake_menu_or_stale(
+                show_menu=_show_store_year_menu,
                 message=message,
                 state=state,
+                buffer_version=services.chat_message_buffer.version(message.chat.id),
                 settings=settings,
                 flow=_STORE_FLOW,
             )
@@ -240,6 +260,14 @@ async def on_intake_menu(
         flow=flow,
         step=callback_data.step,
     ):
+        return
+
+    if not _is_intake_buffer_state_valid(
+        data=data,
+        services=services,
+        chat_id=message.chat.id,
+    ):
+        await handle_stale_selection(message=message, state=state)
         return
 
     if callback_data.action is MenuAction.BACK:
@@ -316,7 +344,7 @@ async def _on_store_back(
             )
 
         case MenuStep.SEASON:
-            await show_or_stale(
+            await _show_intake_menu_or_stale(
                 show_menu=_show_store_year_menu,
                 message=message,
                 state=state,
@@ -329,7 +357,7 @@ async def _on_store_back(
             if year is None:
                 await handle_stale_selection(message=message, state=state)
                 return
-            await show_or_stale(
+            await _show_intake_menu_or_stale(
                 show_menu=_show_store_season_menu,
                 message=message,
                 state=state,
@@ -344,7 +372,7 @@ async def _on_store_back(
                 await handle_stale_selection(message=message, state=state)
                 return
             year, season = selection
-            await show_or_stale(
+            await _show_intake_menu_or_stale(
                 show_menu=_show_store_universe_menu,
                 message=message,
                 state=state,
@@ -361,7 +389,7 @@ async def _on_store_back(
                 return
             year, season, universe = selection
             clip_group = ClipGroup(year=year, season=season, universe=universe)
-            await show_or_stale(
+            await _show_intake_menu_or_stale(
                 show_menu=_show_store_sub_season_menu,
                 message=message,
                 state=state,
@@ -399,7 +427,7 @@ async def _on_store_select(
             if year is None:
                 await handle_stale_selection(message=message, state=state)
                 return
-            await show_or_stale(
+            await _show_intake_menu_or_stale(
                 show_menu=_show_store_season_menu,
                 message=message,
                 state=state,
@@ -414,7 +442,7 @@ async def _on_store_select(
             if year is None or season is None:
                 await handle_stale_selection(message=message, state=state)
                 return
-            await show_or_stale(
+            await _show_intake_menu_or_stale(
                 show_menu=_show_store_universe_menu,
                 message=message,
                 state=state,
@@ -432,7 +460,7 @@ async def _on_store_select(
                 return
             year, season = selection
             clip_group = ClipGroup(year=year, season=season, universe=universe)
-            await show_or_stale(
+            await _show_intake_menu_or_stale(
                 show_menu=_show_store_sub_season_menu,
                 message=message,
                 state=state,
@@ -449,7 +477,7 @@ async def _on_store_select(
                 return
             year, season, universe = selection
             clip_group = ClipGroup(year=year, season=season, universe=universe)
-            await show_or_stale(
+            await _show_intake_menu_or_stale(
                 show_menu=_show_store_scope_menu,
                 message=message,
                 state=state,
@@ -563,6 +591,7 @@ async def _on_reconcile_select(
                 ),
                 reply_markup=None,
             )
+            services.chat_message_buffer.flush(message.chat.id)
             await state.clear()
 
             result = await services.clip_store.reconcile(
@@ -717,14 +746,18 @@ async def _show_reconcile_sub_season_menu(
     settings: Settings,
     clip_group: ClipGroup,
     filename_batches: list[list[str]],
+    buffer_version: int | None = None,
 ) -> None:
-    await _show_store_sub_season_menu(
+    if not await _show_intake_menu_or_stale(
+        show_menu=_show_store_sub_season_menu,
         message=message,
         state=state,
+        buffer_version=buffer_version,
         settings=settings,
         clip_group=clip_group,
         flow=_RECONCILE_FLOW,
-    )
+    ):
+        return
     await state.update_data(
         clip_group=clip_group,
         filename_batches=filename_batches,
@@ -740,14 +773,16 @@ async def _show_reconcile_scope_menu(
     sub_season: SubSeason,
     filename_batches: list[list[str]],
 ) -> None:
-    await _show_store_scope_menu(
+    if not await _show_intake_menu_or_stale(
+        show_menu=_show_store_scope_menu,
         message=message,
         state=state,
         settings=settings,
         clip_group=clip_group,
         sub_season=sub_season,
         flow=_RECONCILE_FLOW,
-    )
+    ):
+        return
     await state.update_data(
         clip_group=clip_group,
         filename_batches=filename_batches,
@@ -811,6 +846,22 @@ def _message_group_to_filenames(message_group: MessageGroup) -> list[str]:
 
 def _message_groups_to_filenames(message_groups: list[MessageGroup]) -> list[list[str]]:
     return [filenames for message_group in message_groups if (filenames := _message_group_to_filenames(message_group))]
+
+
+def _pending_reconcile_filename_batches(
+    *,
+    services: Services,
+    chat_id: ChatId,
+) -> list[list[str]]:
+    return _message_groups_to_filenames(services.chat_message_buffer.peek_grouped(chat_id))
+
+
+def _has_pending_reconcile_videos(
+    *,
+    services: Services,
+    chat_id: ChatId,
+) -> bool:
+    return any(message.video is not None for message in services.chat_message_buffer.peek(chat_id))
 
 
 def _store_year_options(*, current_year: int, min_year: int) -> list[int]:
@@ -928,6 +979,68 @@ def _selection_flow_for_mode(mode: object) -> FlowMenuDefinition | None:
         return _STORE_FLOW
     if mode == _RECONCILE_FLOW.mode:
         return _RECONCILE_FLOW
+    return None
+
+
+def _is_intake_buffer_state_valid(
+    *,
+    data: dict[str, object],
+    services: Services,
+    chat_id: ChatId,
+) -> bool:
+    buffer_version = _buffer_version_from_state(data)
+    if buffer_version is None:
+        return False
+    return buffer_version == services.chat_message_buffer.version(chat_id)
+
+
+async def _intake_buffer_version_for_menu(
+    *,
+    state: FSMContext,
+    buffer_version: int | None,
+) -> int | None:
+    if buffer_version is not None:
+        return buffer_version
+    return _buffer_version_from_state(await state.get_data())
+
+
+async def _store_buffer_version(
+    *,
+    state: FSMContext,
+    buffer_version: int | None,
+) -> None:
+    if buffer_version is None:
+        return
+    await state.update_data(buffer_version=buffer_version)
+
+
+async def _show_intake_menu_or_stale(
+    *,
+    show_menu: IntakeShowMenu,
+    message: Message,
+    state: FSMContext,
+    buffer_version: int | None = None,
+    **kwargs: object,
+) -> bool:
+    resolved_buffer_version = await _intake_buffer_version_for_menu(
+        state=state,
+        buffer_version=buffer_version,
+    )
+    if not await show_menu(
+        message=message,
+        state=state,
+        **kwargs,
+    ):
+        await handle_stale_selection(message=message, state=state)
+        return False
+    await _store_buffer_version(state=state, buffer_version=resolved_buffer_version)
+    return True
+
+
+def _buffer_version_from_state(data: dict[str, object]) -> int | None:
+    buffer_version = data.get(_BUFFER_VERSION_KEY)
+    if isinstance(buffer_version, int):
+        return buffer_version
     return None
 
 
