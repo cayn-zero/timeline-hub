@@ -234,19 +234,39 @@ async def on_intake_action(
                         chat_id=message.chat.id,
                     )
                 except ValueError:
-                    await message.answer("Can't reconcile not stored")
+                    await _invalidate_intake_buffer(
+                        message=message,
+                        state=state,
+                        services=services,
+                        text="Can't reconcile not stored",
+                    )
                     return
 
                 try:
                     clip_group = await services.clip_store.derive_group(filename_batches)
                 except DuplicateFilenamesError:
-                    await message.answer("Can't reconcile duplicates")
+                    await _invalidate_intake_buffer(
+                        message=message,
+                        state=state,
+                        services=services,
+                        text="Can't reconcile duplicates",
+                    )
                     return
                 except InvalidFilenamesError, UnknownClipsError:
-                    await message.answer("Can't reconcile not stored")
+                    await _invalidate_intake_buffer(
+                        message=message,
+                        state=state,
+                        services=services,
+                        text="Can't reconcile not stored",
+                    )
                     return
                 except MixedClipGroupsError:
-                    await message.answer("Can't reconcile mixed groups")
+                    await _invalidate_intake_buffer(
+                        message=message,
+                        state=state,
+                        services=services,
+                        text="Can't reconcile mixed groups",
+                    )
                     return
 
                 buffer_version = services.chat_message_buffer.version(message.chat.id)
@@ -1509,9 +1529,38 @@ async def _show_intake_action_menu(
         clip_count_override=clip_count_override,
     )
     if kwargs is None:
-        await message.edit_text('No clips received', reply_markup=None)
+        await _invalidate_intake_buffer(
+            message=message,
+            state=state,
+            services=services,
+            text='No clips received',
+        )
         return
     await message.edit_text(**kwargs)
+
+
+async def _invalidate_intake_buffer(
+    *,
+    message: Message,
+    state: FSMContext,
+    services: Services,
+    text: str,
+) -> None:
+    """Flush the intake buffer before rendering a non-stale invalidation.
+
+    Intake invalidations that collapse the menu into plain text must always
+    clear the buffered messages so the UI stays stateless. The only exception
+    is stale-selection handling, which uses `Selection is no longer available`
+    and intentionally preserves the buffer.
+
+    This also applies to `Reconcile` pre-execution validation failures. Those
+    failures are intentionally treated as hard invalidations: once the menu is
+    collapsed to a generic error message, the buffered clips are discarded and
+    the user must resend them.
+    """
+    await state.clear()
+    services.chat_message_buffer.flush(message.chat.id)
+    await message.edit_text(text, reply_markup=None)
 
 
 def _store_summary_kwargs(result: StoreResult) -> dict[str, Any]:

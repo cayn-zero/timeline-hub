@@ -833,6 +833,42 @@ async def test_reorder_back_from_empty_state_returns_to_intake_action_menu() -> 
 
 
 @pytest.mark.asyncio
+async def test_reorder_back_with_empty_buffer_flushes_and_shows_no_clips_received() -> None:
+    message = _fake_message(text='Select new order:', chat_id=77, message_id=90)
+    callback = _fake_callback(message)
+    state = _FakeState()
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(chat_id=77, message_id=1, video=_fake_video(file_id='f1', file_name='one.mp4')),
+        chat_id=77,
+    )
+    await state.set_state(ReorderClipFlow.selecting)
+    await state.update_data(
+        mode='reorder',
+        menu_message_id=90,
+        buffer_version=buffer.version(77),
+        selected_order=[],
+        total_clips=1,
+    )
+    buffer.flush(77)
+    services = _services(clip_store=SimpleNamespace(), buffer=buffer)
+
+    await on_reorder_menu(
+        callback,
+        ReorderCallbackData(action=MenuAction.BACK, value='back'),
+        _RecordingBot(),
+        services,
+        _settings(),
+        state,
+    )
+
+    message.edit_text.assert_awaited_once_with('No clips received', reply_markup=None)
+    assert services.chat_message_buffer.peek(77) == []
+    assert state.current_state is None
+    assert state.data == {}
+
+
+@pytest.mark.asyncio
 async def test_reorder_selection_becomes_stale_when_buffer_changes() -> None:
     message = _fake_message(text='Select new order:', chat_id=77, message_id=83)
     callback = _fake_callback(message)
@@ -2858,9 +2894,11 @@ async def test_reconcile_entry_with_missing_video_filename_fails_cleanly_without
     )
 
     clip_store.derive_group.assert_not_awaited()
-    message.answer.assert_awaited_once_with("Can't reconcile not stored")
-    message.edit_text.assert_not_awaited()
-    assert services.chat_message_buffer.peek(77) != []
+    message.answer.assert_not_awaited()
+    message.edit_text.assert_awaited_once_with("Can't reconcile not stored", reply_markup=None)
+    assert services.chat_message_buffer.peek(77) == []
+    assert state.current_state is None
+    assert state.data == {}
 
 
 @pytest.mark.asyncio
@@ -2907,9 +2945,11 @@ async def test_reconcile_entry_surfaces_derive_errors(
         state,
     )
 
-    message.answer.assert_awaited_once_with(expected_message)
+    message.answer.assert_not_awaited()
+    message.edit_text.assert_awaited_once_with(expected_message, reply_markup=None)
     assert state.current_state is None
-    assert services.chat_message_buffer.peek(77) != []
+    assert services.chat_message_buffer.peek(77) == []
+    assert state.data == {}
 
 
 @pytest.mark.asyncio
