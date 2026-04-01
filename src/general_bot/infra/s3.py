@@ -53,6 +53,7 @@ class S3ContentType(StrEnum):
     MP4 = 'video/mp4'  # Standard MP4 video container
     WEBM = 'video/webm'  # Web-optimized video format
 
+    OPUS = 'audio/ogg'  # Opus audio codec stored in Ogg container
     MP3 = 'audio/mpeg'  # Common compressed audio format
     WAV = 'audio/wav'  # Uncompressed audio format
 
