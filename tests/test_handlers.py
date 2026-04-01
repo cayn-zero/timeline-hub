@@ -145,16 +145,15 @@ class _RetrieveClipStore:
 
     async def fetch(
         self,
-        *,
-        clip_group: ClipGroup,
-        clip_sub_group: ClipSubGroup,
+        group: ClipGroup,
+        sub_group: ClipSubGroup,
         clip_ids=None,
     ):
-        self.calls.append((clip_group, clip_sub_group, None if clip_ids is None else tuple(clip_ids)))
-        for batch in self.batches_by_scope[clip_sub_group.scope]:
+        self.calls.append((group, sub_group, None if clip_ids is None else tuple(clip_ids)))
+        for batch in self.batches_by_scope[sub_group.scope]:
             yield batch
 
-    async def list_sub_groups(self, clip_group: ClipGroup) -> list[ClipSubGroup]:
+    async def list_sub_groups(self, group: ClipGroup) -> list[ClipSubGroup]:
         return list(self.sub_groups)
 
 
@@ -177,28 +176,27 @@ class _ProduceClipStore:
         self._fetched_batches = fetched_batches
         self.fetch_calls: list[tuple[ClipGroup, ClipSubGroup, tuple[str, ...] | None]] = []
 
-    async def store(self, clips, *, clip_group: ClipGroup, clip_sub_group: ClipSubGroup) -> StoreResult:
-        self.events.append(('store', ([clip.filename for clip in clips], clip_group, clip_sub_group)))
+    async def store(self, clips, *, group: ClipGroup, sub_group: ClipSubGroup) -> StoreResult:
+        self.events.append(('store', ([clip.filename for clip in clips], group, sub_group)))
         return next(self._store_results)
 
     async def compact(
         self,
+        group: ClipGroup,
+        sub_group: ClipSubGroup,
         *,
-        clip_group: ClipGroup,
-        clip_sub_group: ClipSubGroup,
         batch_size: int,
     ) -> None:
-        self.events.append(('compact', (clip_group, clip_sub_group, batch_size)))
+        self.events.append(('compact', (group, sub_group, batch_size)))
 
     async def fetch(
         self,
-        *,
-        clip_group: ClipGroup,
-        clip_sub_group: ClipSubGroup,
+        group: ClipGroup,
+        sub_group: ClipSubGroup,
         clip_ids=None,
     ):
-        self.fetch_calls.append((clip_group, clip_sub_group, None if clip_ids is None else tuple(clip_ids)))
-        self.events.append(('fetch', (clip_group, clip_sub_group, None if clip_ids is None else tuple(clip_ids))))
+        self.fetch_calls.append((group, sub_group, None if clip_ids is None else tuple(clip_ids)))
+        self.events.append(('fetch', (group, sub_group, None if clip_ids is None else tuple(clip_ids))))
         for batch in self._fetched_batches:
             yield batch
 
@@ -1394,12 +1392,12 @@ async def test_route_action_stores_clips_in_caption_route_order_across_message_g
     clip_store.store.assert_awaited_once()
     stored_clips = clip_store.store.await_args.args[0]
     assert [clip.filename for clip in stored_clips] == ['one.mp4', 'two.mp4', 'three.mp4']
-    assert clip_store.store.await_args.kwargs['clip_group'] == ClipGroup(
+    assert clip_store.store.await_args.kwargs['group'] == ClipGroup(
         universe=Universe.WEST,
         year=2025,
         season=Season.S1,
     )
-    assert clip_store.store.await_args.kwargs['clip_sub_group'] == ClipSubGroup(
+    assert clip_store.store.await_args.kwargs['sub_group'] == ClipSubGroup(
         sub_season=SubSeason.NONE,
         scope=Scope.SOURCE,
     )
@@ -1410,8 +1408,8 @@ async def test_route_action_stores_clips_in_caption_route_order_across_message_g
     )
     message.answer.assert_awaited_once_with(**Text('Stored: ', Bold('3')).as_kwargs())
     clip_store.compact.assert_awaited_once_with(
-        clip_group=ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
-        clip_sub_group=ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
+        ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
+        ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
         batch_size=intake_module._TELEGRAM_MEDIA_GROUP_LIMIT,
     )
     assert state.current_state is None
@@ -1488,18 +1486,18 @@ async def test_route_action_splits_store_calls_when_caption_route_overrides() ->
     second_batch = clip_store.store.await_args_list[1].args[0]
     assert [clip.filename for clip in first_batch] == ['one.mp4', 'two.mp4']
     assert [clip.filename for clip in second_batch] == ['three.mp4', 'four.mp4']
-    assert clip_store.store.await_args_list[0].kwargs['clip_group'] == ClipGroup(
+    assert clip_store.store.await_args_list[0].kwargs['group'] == ClipGroup(
         universe=Universe.WEST,
         year=2025,
         season=Season.S1,
     )
-    assert clip_store.store.await_args_list[1].kwargs['clip_group'] == ClipGroup(
+    assert clip_store.store.await_args_list[1].kwargs['group'] == ClipGroup(
         universe=Universe.EAST,
         year=2024,
         season=Season.S2,
     )
     assert all(
-        call.kwargs['clip_sub_group'] == ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE)
+        call.kwargs['sub_group'] == ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE)
         for call in clip_store.store.await_args_list
     )
     assert message.edit_text.await_args_list[0] == call('Routing...', reply_markup=None)
@@ -1523,13 +1521,13 @@ async def test_route_action_splits_store_calls_when_caption_route_overrides() ->
     )
     assert clip_store.compact.await_args_list == [
         call(
-            clip_group=ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
-            clip_sub_group=ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
+            ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
+            ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
             batch_size=intake_module._TELEGRAM_MEDIA_GROUP_LIMIT,
         ),
         call(
-            clip_group=ClipGroup(universe=Universe.EAST, year=2024, season=Season.S2),
-            clip_sub_group=ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
+            ClipGroup(universe=Universe.EAST, year=2024, season=Season.S2),
+            ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
             batch_size=intake_module._TELEGRAM_MEDIA_GROUP_LIMIT,
         ),
     ]
@@ -1587,7 +1585,7 @@ async def test_route_action_chunks_long_single_route_group_without_duplicate_pro
         'clip-10.mp4',
     ]
     assert all(
-        call.kwargs['clip_group'] == ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1)
+        call.kwargs['group'] == ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1)
         for call in clip_store.store.await_args_list
     )
     assert message.edit_text.await_args_list[0] == call('Routing...', reply_markup=None)
@@ -1598,8 +1596,8 @@ async def test_route_action_chunks_long_single_route_group_without_duplicate_pro
     assert len(message.edit_text.await_args_list) == 2
     message.answer.assert_awaited_once_with(**Text('Stored: ', Bold('10')).as_kwargs())
     clip_store.compact.assert_awaited_once_with(
-        clip_group=ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
-        clip_sub_group=ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
+        ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
+        ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
         batch_size=intake_module._TELEGRAM_MEDIA_GROUP_LIMIT,
     )
 
@@ -1662,17 +1660,17 @@ async def test_route_action_chunks_per_route_group_without_crossing_route_bounda
     ]
     assert [clip.filename for clip in clip_store.store.await_args_list[1].args[0]] == ['west-9.mp4']
     assert [clip.filename for clip in clip_store.store.await_args_list[2].args[0]] == ['east-1.mp4']
-    assert clip_store.store.await_args_list[0].kwargs['clip_group'] == ClipGroup(
+    assert clip_store.store.await_args_list[0].kwargs['group'] == ClipGroup(
         universe=Universe.WEST,
         year=2025,
         season=Season.S1,
     )
-    assert clip_store.store.await_args_list[1].kwargs['clip_group'] == ClipGroup(
+    assert clip_store.store.await_args_list[1].kwargs['group'] == ClipGroup(
         universe=Universe.WEST,
         year=2025,
         season=Season.S1,
     )
-    assert clip_store.store.await_args_list[2].kwargs['clip_group'] == ClipGroup(
+    assert clip_store.store.await_args_list[2].kwargs['group'] == ClipGroup(
         universe=Universe.EAST,
         year=2024,
         season=Season.S2,
@@ -1690,13 +1688,13 @@ async def test_route_action_chunks_per_route_group_without_crossing_route_bounda
     assert len(message.edit_text.await_args_list) == 3
     assert clip_store.compact.await_args_list == [
         call(
-            clip_group=ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
-            clip_sub_group=ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
+            ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
+            ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
             batch_size=intake_module._TELEGRAM_MEDIA_GROUP_LIMIT,
         ),
         call(
-            clip_group=ClipGroup(universe=Universe.EAST, year=2024, season=Season.S2),
-            clip_sub_group=ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
+            ClipGroup(universe=Universe.EAST, year=2024, season=Season.S2),
+            ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
             batch_size=intake_module._TELEGRAM_MEDIA_GROUP_LIMIT,
         ),
     ]
@@ -1759,17 +1757,17 @@ async def test_route_action_updates_active_route_from_standalone_text_and_clip_c
     assert [clip.filename for clip in clip_store.store.await_args_list[0].args[0]] == ['one.mp4']
     assert [clip.filename for clip in clip_store.store.await_args_list[1].args[0]] == ['two.mp4']
     assert [clip.filename for clip in clip_store.store.await_args_list[2].args[0]] == ['three.mp4', 'four.mp4']
-    assert clip_store.store.await_args_list[0].kwargs['clip_group'] == ClipGroup(
+    assert clip_store.store.await_args_list[0].kwargs['group'] == ClipGroup(
         universe=Universe.WEST,
         year=2025,
         season=Season.S1,
     )
-    assert clip_store.store.await_args_list[1].kwargs['clip_group'] == ClipGroup(
+    assert clip_store.store.await_args_list[1].kwargs['group'] == ClipGroup(
         universe=Universe.EAST,
         year=2024,
         season=Season.S2,
     )
-    assert clip_store.store.await_args_list[2].kwargs['clip_group'] == ClipGroup(
+    assert clip_store.store.await_args_list[2].kwargs['group'] == ClipGroup(
         universe=Universe.WEST,
         year=2025,
         season=Season.S2,
@@ -1793,18 +1791,18 @@ async def test_route_action_updates_active_route_from_standalone_text_and_clip_c
     message.answer.assert_awaited_once_with(**Text('Stored: ', Bold('4')).as_kwargs())
     assert clip_store.compact.await_args_list == [
         call(
-            clip_group=ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
-            clip_sub_group=ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
+            ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
+            ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
             batch_size=intake_module._TELEGRAM_MEDIA_GROUP_LIMIT,
         ),
         call(
-            clip_group=ClipGroup(universe=Universe.EAST, year=2024, season=Season.S2),
-            clip_sub_group=ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
+            ClipGroup(universe=Universe.EAST, year=2024, season=Season.S2),
+            ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
             batch_size=intake_module._TELEGRAM_MEDIA_GROUP_LIMIT,
         ),
         call(
-            clip_group=ClipGroup(universe=Universe.WEST, year=2025, season=Season.S2),
-            clip_sub_group=ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
+            ClipGroup(universe=Universe.WEST, year=2025, season=Season.S2),
+            ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
             batch_size=intake_module._TELEGRAM_MEDIA_GROUP_LIMIT,
         ),
     ]
@@ -1908,7 +1906,7 @@ async def test_route_action_uses_latest_valid_pre_clip_text_before_first_video()
     )
 
     assert [clip.filename for clip in clip_store.store.await_args.args[0]] == ['one.mp4']
-    assert clip_store.store.await_args.kwargs['clip_group'] == ClipGroup(
+    assert clip_store.store.await_args.kwargs['group'] == ClipGroup(
         universe=Universe.WEST,
         year=2025,
         season=Season.S1,
@@ -1920,8 +1918,8 @@ async def test_route_action_uses_latest_valid_pre_clip_text_before_first_video()
         ('West', '2025', '1', 'Source'),
     )
     clip_store.compact.assert_awaited_once_with(
-        clip_group=ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
-        clip_sub_group=ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
+        ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
+        ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
         batch_size=intake_module._TELEGRAM_MEDIA_GROUP_LIMIT,
     )
     assert services.chat_message_buffer.peek(77) == []
@@ -1959,7 +1957,7 @@ async def test_route_action_ignores_invalid_pre_clip_text_until_valid_route_text
         state,
     )
 
-    assert clip_store.store.await_args.kwargs['clip_group'] == ClipGroup(
+    assert clip_store.store.await_args.kwargs['group'] == ClipGroup(
         universe=Universe.EAST,
         year=2024,
         season=Season.S2,
@@ -3214,10 +3212,10 @@ async def test_store_scope_selection_aggregates_results_and_sends_exact_summary(
     assert [clip.filename for clip in second_group] == ['two.mp4', 'three.mp4']
     expected_group = ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1)
     expected_sub_group = ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.COLLECTION)
-    assert clip_store.store.await_args_list[0].kwargs['clip_group'] == expected_group
-    assert clip_store.store.await_args_list[0].kwargs['clip_sub_group'] == expected_sub_group
-    assert clip_store.store.await_args_list[1].kwargs['clip_group'] == expected_group
-    assert clip_store.store.await_args_list[1].kwargs['clip_sub_group'] == expected_sub_group
+    assert clip_store.store.await_args_list[0].kwargs['group'] == expected_group
+    assert clip_store.store.await_args_list[0].kwargs['sub_group'] == expected_sub_group
+    assert clip_store.store.await_args_list[1].kwargs['group'] == expected_group
+    assert clip_store.store.await_args_list[1].kwargs['sub_group'] == expected_sub_group
     clip_store.compact.assert_not_awaited()
     message.answer.assert_awaited_once_with(
         **Text(
@@ -3477,8 +3475,8 @@ async def test_store_scope_selection_compacts_extra_and_source_batches(scope: Sc
     )
 
     clip_store.compact.assert_awaited_once_with(
-        clip_group=ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
-        clip_sub_group=ClipSubGroup(sub_season=SubSeason.NONE, scope=scope),
+        ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
+        ClipSubGroup(sub_season=SubSeason.NONE, scope=scope),
         batch_size=intake_module._TELEGRAM_MEDIA_GROUP_LIMIT,
     )
 
@@ -3625,8 +3623,8 @@ async def test_reconcile_scope_selection_uses_stored_filename_batches_without_do
 
     clip_store.reconcile.assert_awaited_once_with(
         [['one.mp4'], ['two.mp4', 'three.mp4']],
-        clip_group=ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
-        clip_sub_group=ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.COLLECTION),
+        group=ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
+        sub_group=ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.COLLECTION),
     )
     bot.get_file.assert_not_awaited()
     bot.download_file.assert_not_awaited()

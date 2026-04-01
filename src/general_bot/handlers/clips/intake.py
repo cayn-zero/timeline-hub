@@ -397,8 +397,8 @@ async def on_intake_action(
             for clip_group in route_result.compact_groups:
                 try:
                     await services.clip_store.compact(
-                        clip_group=clip_group,
-                        clip_sub_group=ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
+                        clip_group,
+                        ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE),
                         batch_size=_TELEGRAM_MEDIA_GROUP_LIMIT,
                     )
                 except Exception:
@@ -836,8 +836,8 @@ async def _on_store_select(
                 if result.stored_count > 0 and _should_compact_after_store(scope):
                     try:
                         await services.clip_store.compact(
-                            clip_group=clip_group,
-                            clip_sub_group=clip_sub_group,
+                            clip_group,
+                            clip_sub_group,
                             batch_size=_TELEGRAM_MEDIA_GROUP_LIMIT,
                         )
                     except Exception:
@@ -853,8 +853,8 @@ async def _on_store_select(
                         bot=bot,
                         chat_id=message.chat.id,
                         clip_batches=services.clip_store.fetch(
-                            clip_group=clip_group,
-                            clip_sub_group=clip_sub_group,
+                            clip_group,
+                            clip_sub_group,
                             clip_ids=result.clip_ids,
                         ),
                         settings=settings,
@@ -920,8 +920,8 @@ async def _on_reconcile_select(
 
             result = await services.clip_store.reconcile(
                 filename_batches,
-                clip_group=clip_group,
-                clip_sub_group=clip_sub_group,
+                group=clip_group,
+                sub_group=clip_sub_group,
             )
             await message.answer(**_reconcile_summary_kwargs(result))
 
@@ -1133,8 +1133,8 @@ async def _store_buffered_clips(
             continue
         result += await services.clip_store.store(
             clips,
-            clip_group=clip_group,
-            clip_sub_group=clip_sub_group,
+            group=clip_group,
+            sub_group=clip_sub_group,
         )
 
     return result
@@ -1231,8 +1231,8 @@ async def _store_route_batches(
                     bot=bot,
                     messages=route_batch.messages[start : start + _ROUTE_STORE_CHUNK_SIZE],
                 ),
-                clip_group=route_batch.clip_group,
-                clip_sub_group=clip_sub_group,
+                group=route_batch.clip_group,
+                sub_group=clip_sub_group,
             )
             result += batch_result
             if batch_result.stored_count > 0:

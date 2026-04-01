@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from enum import IntEnum, StrEnum
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Self, TypeVar
 
 from general_bot.infra.s3 import Key, Prefix, S3Client, S3ContentType, S3ObjectNotFoundError
 
@@ -25,6 +25,7 @@ _CLIP_GROUP_SEPARATOR = '-'
 _FILENAME_S3_DELIMITER_ESCAPE = '--'
 
 type Filename = str
+type ClipId = str
 
 
 class Season(IntEnum):
@@ -90,6 +91,9 @@ class SubSeason(StrEnum):
     C = 'C'
     D = 'D'
 
+    def order(self) -> int:
+        return tuple(type(self)).index(self)
+
 
 class Scope(StrEnum):
     """Clip scope identifier."""
@@ -97,15 +101,6 @@ class Scope(StrEnum):
     COLLECTION = 'collection'
     EXTRA = 'extra'
     SOURCE = 'source'
-
-
-_SUB_SEASON_ORDER = {
-    SubSeason.A: 0,
-    SubSeason.B: 1,
-    SubSeason.C: 2,
-    SubSeason.D: 3,
-    SubSeason.NONE: 4,
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +128,7 @@ class Clip:
 class ManifestEntry:
     """Single persisted clip row in a clip-group manifest."""
 
-    id: str
+    id: ClipId
     video_hash: str
     sub_season: SubSeason
     scope: Scope
@@ -161,7 +156,7 @@ class Manifest:
         """Append a manifest entry."""
         self._entries.append(entry)
 
-    def has_id(self, clip_id: str) -> bool:
+    def has_id(self, clip_id: ClipId) -> bool:
         """Return whether the manifest already contains a clip id."""
         return any(entry.id == clip_id for entry in self._entries)
 
@@ -207,7 +202,7 @@ class Manifest:
             raise ValueError('manifest root must be a list')
 
         entries: list[ManifestEntry] = []
-        seen_ids: set[str] = set()
+        seen_ids: set[ClipId] = set()
         seen_hashes: set[str] = set()
         seen_positions: set[tuple[SubSeason, Scope, int, int]] = set()
 
@@ -280,7 +275,7 @@ class StoreResult:
 
     stored_count: int
     duplicate_count: int
-    clip_ids: tuple[str, ...] = ()
+    clip_ids: tuple[ClipId, ...] = ()
 
     def __add__(self, other: Self) -> Self:
         if not isinstance(other, type(self)):
@@ -319,7 +314,7 @@ class MixedClipGroupsError(ValueError):
 class UnknownClipsError(ValueError):
     """Raised when reconcile filenames refer to clip ids missing from the manifest."""
 
-    def __init__(self, *, clip_ids: Sequence[str]) -> None:
+    def __init__(self, *, clip_ids: Sequence[ClipId]) -> None:
         self.clip_ids = tuple(clip_ids)
         super().__init__(f'Clip ids are not present in manifest: {list(self.clip_ids)}')
 
@@ -327,7 +322,7 @@ class UnknownClipsError(ValueError):
 class DuplicateClipIdsError(ValueError):
     """Raised when `fetch()` receives duplicate clip ids."""
 
-    def __init__(self, *, clip_ids: Sequence[str]) -> None:
+    def __init__(self, *, clip_ids: Sequence[ClipId]) -> None:
         self.clip_ids = tuple(clip_ids)
         super().__init__(f'Clip ids contain duplicates: {list(self.clip_ids)}')
 
@@ -335,7 +330,7 @@ class DuplicateClipIdsError(ValueError):
 class ClipIdsNotInSubGroupError(ValueError):
     """Raised when `fetch()` receives clip ids outside the requested subgroup."""
 
-    def __init__(self, *, clip_ids: Sequence[str]) -> None:
+    def __init__(self, *, clip_ids: Sequence[ClipId]) -> None:
         self.clip_ids = tuple(clip_ids)
         super().__init__(f'Clip ids are not present in requested sub-group: {list(self.clip_ids)}')
 
@@ -416,8 +411,8 @@ class ClipStore:
         self,
         clips: Sequence[Clip],
         *,
-        clip_group: ClipGroup,
-        clip_sub_group: ClipSubGroup,
+        group: ClipGroup,
+        sub_group: ClipSubGroup,
     ) -> StoreResult:
         """Store one logical clip batch with clip-group-local deduplication.
 
@@ -440,15 +435,15 @@ class ClipStore:
             RuntimeError: If clip hashing fails.
         """
         clip_group_prefix = self._clip_group_prefix(
-            universe=clip_group.universe,
-            year=clip_group.year,
-            season=clip_group.season,
+            universe=group.universe,
+            year=group.year,
+            season=group.season,
         )
         manifest = await self._load_manifest_for_store(clip_group_prefix)
         seen_hashes: set[str] = set()
-        seen_ids: set[str] = set()
+        seen_ids: set[ClipId] = set()
         duplicate_count = 0
-        accepted_clips: list[tuple[str, str, Clip]] = []
+        accepted_clips: list[tuple[ClipId, str, Clip]] = []
         uploaded_keys: list[Key] = []
         for clip in clips:
             stored_clip_id = self._parse_stored_clip_id(clip.filename)
@@ -471,16 +466,16 @@ class ClipStore:
             return StoreResult(stored_count=0, duplicate_count=duplicate_count)
 
         batch = manifest.next_batch(
-            sub_season=clip_sub_group.sub_season,
-            scope=clip_sub_group.scope,
+            sub_season=sub_group.sub_season,
+            scope=sub_group.scope,
         )
         new_entries: list[tuple[ManifestEntry, Clip]] = []
         for order, (clip_id, video_hash, clip) in enumerate(accepted_clips, start=1):
             entry = ManifestEntry(
                 id=clip_id,
                 video_hash=video_hash,
-                sub_season=clip_sub_group.sub_season,
-                scope=clip_sub_group.scope,
+                sub_season=sub_group.sub_season,
+                scope=sub_group.scope,
                 batch=batch,
                 order=order,
             )
@@ -522,9 +517,9 @@ class ClipStore:
 
     async def compact(
         self,
+        group: ClipGroup,
+        sub_group: ClipSubGroup,
         *,
-        clip_group: ClipGroup,
-        clip_sub_group: ClipSubGroup,
         batch_size: int,
     ) -> None:
         """Compact one clip sub-group by rewriting manifest batch metadata only.
@@ -544,29 +539,29 @@ class ClipStore:
             raise ValueError('`batch_size` must be >= 1')
 
         clip_group_prefix = self._clip_group_prefix(
-            universe=clip_group.universe,
-            year=clip_group.year,
-            season=clip_group.season,
+            universe=group.universe,
+            year=group.year,
+            season=group.season,
         )
         try:
             manifest = await self._load_manifest_for_read(clip_group_prefix)
         except S3ObjectNotFoundError as error:
             raise ClipGroupNotFoundError(
-                universe=clip_group.universe,
-                year=clip_group.year,
-                season=clip_group.season,
+                universe=group.universe,
+                year=group.year,
+                season=group.season,
                 sub_season=None,
                 scope=None,
             ) from error
 
-        target_entries = self._sorted_sub_group_entries(manifest, clip_sub_group)
+        target_entries = self._sorted_sub_group_entries(manifest, sub_group)
         if not target_entries:
             raise ClipGroupNotFoundError(
-                universe=clip_group.universe,
-                year=clip_group.year,
-                season=clip_group.season,
-                sub_season=clip_sub_group.sub_season,
-                scope=clip_sub_group.scope,
+                universe=group.universe,
+                year=group.year,
+                season=group.season,
+                sub_season=sub_group.sub_season,
+                scope=sub_group.scope,
             )
 
         compacted_positions: dict[str, tuple[int, int]] = {}
@@ -583,7 +578,7 @@ class ClipStore:
 
         rewritten_entries: list[ManifestEntry] = []
         for entry in manifest:
-            if entry.scope is clip_sub_group.scope and entry.sub_season is clip_sub_group.sub_season:
+            if entry.scope is sub_group.scope and entry.sub_season is sub_group.sub_season:
                 compacted_batch, compacted_order = compacted_positions[entry.id]
                 rewritten_entries.append(
                     ManifestEntry(
@@ -673,8 +668,8 @@ class ClipStore:
         self,
         filename_batches: Sequence[Sequence[Filename]],
         *,
-        clip_group: ClipGroup,
-        clip_sub_group: ClipSubGroup,
+        group: ClipGroup,
+        sub_group: ClipSubGroup,
     ) -> ReconcileResult:
         """Replace one sub-group with the provided filename-derived manifest state.
 
@@ -707,15 +702,15 @@ class ClipStore:
         if len(set(flat_filenames)) != len(flat_filenames):
             raise DuplicateFilenamesError('`filename_batches` must not contain duplicate filenames')
 
-        clip_id_batches: list[list[str]] = []
+        clip_id_batches: list[list[ClipId]] = []
         for batch in filename_batches:
-            clip_id_batch: list[str] = []
+            clip_id_batch: list[ClipId] = []
             for filename in batch:
                 parsed_identity = self._parse_filename_identity(filename)
                 if parsed_identity is None:
                     raise InvalidFilenamesError(f'Filename is not a stored clip: {filename}')
                 parsed_group, clip_id = parsed_identity
-                if parsed_group != clip_group:
+                if parsed_group != group:
                     raise ValueError('`filename_batches` must belong to the provided `clip_group`')
                 clip_id_batch.append(clip_id)
             clip_id_batches.append(clip_id_batch)
@@ -725,17 +720,17 @@ class ClipStore:
             raise ValueError('`filename_batches` must contain at least one filename')
 
         clip_group_prefix = self._clip_group_prefix(
-            universe=clip_group.universe,
-            year=clip_group.year,
-            season=clip_group.season,
+            universe=group.universe,
+            year=group.year,
+            season=group.season,
         )
         try:
             manifest = await self._load_manifest_for_read(clip_group_prefix)
         except S3ObjectNotFoundError as error:
             raise ClipGroupNotFoundError(
-                universe=clip_group.universe,
-                year=clip_group.year,
-                season=clip_group.season,
+                universe=group.universe,
+                year=group.year,
+                season=group.season,
                 sub_season=None,
                 scope=None,
             ) from error
@@ -746,14 +741,12 @@ class ClipStore:
             raise UnknownClipsError(clip_ids=unknown_ids)
 
         existing_target_entries = [
-            entry
-            for entry in manifest
-            if entry.scope is clip_sub_group.scope and entry.sub_season is clip_sub_group.sub_season
+            entry for entry in manifest if entry.scope is sub_group.scope and entry.sub_season is sub_group.sub_season
         ]
         old_subgroup_ids = {entry.id for entry in existing_target_entries}
 
         new_entries: list[ManifestEntry] = []
-        new_subgroup_ids: set[str] = set()
+        new_subgroup_ids: set[ClipId] = set()
         for batch_index, clip_id_batch in enumerate(clip_id_batches, start=1):
             for order_index, clip_id in enumerate(clip_id_batch, start=1):
                 existing_entry = entries_by_id[clip_id]
@@ -761,8 +754,8 @@ class ClipStore:
                     ManifestEntry(
                         id=clip_id,
                         video_hash=existing_entry.video_hash,
-                        sub_season=clip_sub_group.sub_season,
-                        scope=clip_sub_group.scope,
+                        sub_season=sub_group.sub_season,
+                        scope=sub_group.scope,
                         batch=batch_index,
                         order=order_index,
                     )
@@ -771,7 +764,7 @@ class ClipStore:
 
         rewritten_entries: list[ManifestEntry] = []
         for entry in manifest:
-            if entry.scope is clip_sub_group.scope and entry.sub_season is clip_sub_group.sub_season:
+            if entry.scope is sub_group.scope and entry.sub_season is sub_group.sub_season:
                 continue
             if entry.id in new_subgroup_ids:
                 continue
@@ -811,10 +804,10 @@ class ClipStore:
 
     async def fetch(
         self,
+        group: ClipGroup,
+        sub_group: ClipSubGroup,
         *,
-        clip_group: ClipGroup,
-        clip_sub_group: ClipSubGroup,
-        clip_ids: Sequence[str] | None = None,
+        clip_ids: Sequence[ClipId] | None = None,
     ) -> AsyncIterator[list[Clip]]:
         """Fetch clips for a clip sub-group in preserved batch order.
 
@@ -842,30 +835,30 @@ class ClipStore:
             ClipIdsNotInSubGroupError: If `clip_ids` contains ids outside the requested subgroup.
         """
         clip_group_prefix = self._clip_group_prefix(
-            universe=clip_group.universe,
-            year=clip_group.year,
-            season=clip_group.season,
+            universe=group.universe,
+            year=group.year,
+            season=group.season,
         )
         try:
             manifest = await self._load_manifest_for_read(clip_group_prefix)
         except S3ObjectNotFoundError as error:
             raise ClipGroupNotFoundError(
-                universe=clip_group.universe,
-                year=clip_group.year,
-                season=clip_group.season,
+                universe=group.universe,
+                year=group.year,
+                season=group.season,
                 sub_season=None,
                 scope=None,
             ) from error
 
-        matching_entries = self._sorted_sub_group_entries(manifest, clip_sub_group)
+        matching_entries = self._sorted_sub_group_entries(manifest, sub_group)
         if clip_ids is None:
             if not matching_entries:
                 raise ClipGroupNotFoundError(
-                    universe=clip_group.universe,
-                    year=clip_group.year,
-                    season=clip_group.season,
-                    sub_season=clip_sub_group.sub_season,
-                    scope=clip_sub_group.scope,
+                    universe=group.universe,
+                    year=group.year,
+                    season=group.season,
+                    sub_season=sub_group.sub_season,
+                    scope=sub_group.scope,
                 )
         else:
             if len(set(clip_ids)) != len(clip_ids):
@@ -902,21 +895,21 @@ class ClipStore:
         clip_groups = [self._parse_clip_group_prefix(prefix) for prefix in clip_group_prefixes]
         return sorted(clip_groups, key=lambda group: (group.universe.order(), group.year, int(group.season)))
 
-    async def list_sub_groups(self, clip_group: ClipGroup) -> list[ClipSubGroup]:
+    async def list_sub_groups(self, group: ClipGroup) -> list[ClipSubGroup]:
         """List unique sub-groups for a clip group from its manifest."""
         clip_group_prefix = self._clip_group_prefix(
-            universe=clip_group.universe,
-            year=clip_group.year,
-            season=clip_group.season,
+            universe=group.universe,
+            year=group.year,
+            season=group.season,
         )
 
         try:
             manifest = await self._load_manifest_for_read(clip_group_prefix)
         except S3ObjectNotFoundError as error:
             raise ClipGroupNotFoundError(
-                universe=clip_group.universe,
-                year=clip_group.year,
-                season=clip_group.season,
+                universe=group.universe,
+                year=group.year,
+                season=group.season,
                 sub_season=None,
                 scope=None,
             ) from error
@@ -925,8 +918,7 @@ class ClipStore:
         return sorted(
             sub_groups,
             key=lambda sub_group: (
-                sub_group.sub_season is not SubSeason.NONE,
-                _sub_season_order(sub_group.sub_season),
+                sub_group.sub_season.order(),
                 sub_group.scope.value,
             ),
         )
@@ -970,10 +962,10 @@ class ClipStore:
     def _manifest_key(self, clip_group_prefix: Prefix) -> Key:
         return S3Client.join(clip_group_prefix, _MANIFEST_FILENAME)
 
-    def _clip_key(self, clip_group_prefix: Prefix, clip_id: str) -> Key:
+    def _clip_key(self, clip_group_prefix: Prefix, clip_id: ClipId) -> Key:
         return S3Client.join(clip_group_prefix, clip_id + _VIDEO_SUFFIX)
 
-    def _new_clip_id(self, *, manifest: Manifest, seen_ids: set[str]) -> str:
+    def _new_clip_id(self, *, manifest: Manifest, seen_ids: set[ClipId]) -> ClipId:
         """Return a fresh hex UUIDv7 clip id for a newly created S3 clip object.
 
         Its embedded timestamp reflects when that object is created.
@@ -983,14 +975,14 @@ class ClipStore:
             if not manifest.has_id(clip_id) and clip_id not in seen_ids:
                 return clip_id
 
-    def _parse_stored_clip_id(self, filename: str) -> str | None:
+    def _parse_stored_clip_id(self, filename: str) -> ClipId | None:
         parsed_identity = self._parse_filename_identity(filename)
         if parsed_identity is None:
             return None
         _, clip_id = parsed_identity
         return clip_id
 
-    def _parse_filename_identity(self, filename: Filename) -> tuple[ClipGroup, str] | None:
+    def _parse_filename_identity(self, filename: Filename) -> tuple[ClipGroup, ClipId] | None:
         parts = S3Client.split(self._filename_to_s3_key(filename))
         if len(parts) != 3:
             return None
@@ -1126,13 +1118,16 @@ def _uuid7() -> uuid.UUID:
     return uuid.uuid7()
 
 
+_ClipStrEnum = TypeVar('_ClipStrEnum', bound=StrEnum)
+
+
 def _expect_str(value: object, *, field: str) -> str:
     if not isinstance(value, str):
         raise ValueError(f'manifest `{field}` must be a string')
     return value
 
 
-def _parse_uuid7(value: str, *, field: str) -> str:
+def _parse_uuid7(value: str, *, field: str) -> ClipId:
     try:
         parsed = uuid.UUID(value)
     except ValueError as error:
@@ -1152,7 +1147,7 @@ def _parse_sha256_hex(value: str) -> str:
     return value
 
 
-def _parse_enum(value: object, enum_type: type[StrEnum], *, field: str) -> Any:
+def _parse_enum(value: object, enum_type: type[_ClipStrEnum], *, field: str) -> _ClipStrEnum:
     if not isinstance(value, str):
         raise ValueError(f'manifest `{field}` must be a string')
     try:
@@ -1167,10 +1162,6 @@ def _parse_sub_season(value: object) -> SubSeason:
 
 def _format_sub_season(sub_season: SubSeason) -> str:
     return sub_season.value.title()
-
-
-def _sub_season_order(sub_season: SubSeason) -> int:
-    return _SUB_SEASON_ORDER[sub_season]
 
 
 def _format_optional_sub_season(sub_season: SubSeason | None) -> str:

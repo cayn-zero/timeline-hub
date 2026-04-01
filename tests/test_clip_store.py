@@ -288,8 +288,8 @@ async def test_fetch_returns_grouped_clips_with_portable_filenames() -> None:
     batches = [
         batch
         async for batch in store.fetch(
-            clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-            clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+            ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+            ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
         )
     ]
 
@@ -362,8 +362,8 @@ async def test_fetch_with_clip_ids_returns_only_requested_sub_group_subset_in_ma
     batches = [
         batch
         async for batch in store.fetch(
-            clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-            clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+            ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+            ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
             clip_ids=[_UUID_3, _UUID_1],
         )
     ]
@@ -400,8 +400,8 @@ async def test_fetch_with_duplicate_clip_ids_raises() -> None:
         [
             batch
             async for batch in store.fetch(
-                clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-                clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+                ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+                ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
                 clip_ids=[_UUID_1, _UUID_1],
             )
         ]
@@ -433,8 +433,8 @@ async def test_fetch_with_unknown_clip_ids_raises() -> None:
         [
             batch
             async for batch in store.fetch(
-                clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-                clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+                ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+                ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
                 clip_ids=[_UUID_2],
             )
         ]
@@ -474,8 +474,8 @@ async def test_fetch_with_clip_ids_from_other_sub_group_raises() -> None:
         [
             batch
             async for batch in store.fetch(
-                clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-                clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+                ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+                ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
                 clip_ids=[_UUID_2],
             )
         ]
@@ -489,8 +489,8 @@ async def test_fetch_fails_with_empty_sub_group_fields_when_group_is_missing() -
         [
             batch
             async for batch in store.fetch(
-                clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-                clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+                ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+                ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
             )
         ]
 
@@ -527,8 +527,8 @@ async def test_fetch_fails_with_requested_sub_group_fields_when_sub_group_is_mis
         [
             batch
             async for batch in store.fetch(
-                clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-                clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+                ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+                ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
             )
         ]
 
@@ -726,8 +726,8 @@ async def test_store_treats_existing_current_group_id_as_duplicate(monkeypatch: 
 
     result = await store.store(
         [Clip(filename=clip_key, bytes=b'clip')],
-        clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-        clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+        group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+        sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
     )
 
     assert result.stored_count == 0
@@ -746,8 +746,8 @@ async def test_store_generates_fresh_id_for_non_s3_filename(monkeypatch: pytest.
 
     result = await store.store(
         [Clip(filename='incoming.mp4', bytes=b'clip')],
-        clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-        clip_sub_group=ClipSubGroup(sub_season=SubSeason.B, scope=Scope.EXTRA),
+        group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+        sub_group=ClipSubGroup(sub_season=SubSeason.B, scope=Scope.EXTRA),
     )
 
     assert result == clip_store_module.StoreResult(
@@ -795,8 +795,8 @@ async def test_store_generates_new_id_for_same_group_s3_like_filename(monkeypatc
 
     result = await store.store(
         [Clip(filename=source_clip_key, bytes=b'clip')],
-        clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-        clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+        group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+        sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
     )
 
     assert result == clip_store_module.StoreResult(
@@ -839,8 +839,8 @@ async def test_store_generates_new_id_for_s3_like_filename_from_different_group(
 
     result = await store.store(
         [Clip(filename=source_clip_key, bytes=b'clip')],
-        clip_group=ClipGroup(universe=Universe.EAST, year=2024, season=Season.S1),
-        clip_sub_group=ClipSubGroup(sub_season=SubSeason.B, scope=Scope.EXTRA),
+        group=ClipGroup(universe=Universe.EAST, year=2024, season=Season.S1),
+        sub_group=ClipSubGroup(sub_season=SubSeason.B, scope=Scope.EXTRA),
     )
 
     assert result == clip_store_module.StoreResult(
@@ -885,8 +885,8 @@ async def test_store_treats_existing_video_hash_as_duplicate(monkeypatch: pytest
 
     result = await store.store(
         [Clip(filename='incoming.mp4', bytes=b'clip')],
-        clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-        clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+        group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+        sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
     )
 
     assert result.stored_count == 0
@@ -910,8 +910,8 @@ async def test_store_generates_new_ids_for_same_call_repeated_unadopted_parsed_i
             Clip(filename=source_clip_key, bytes=b'first'),
             Clip(filename=source_clip_key, bytes=b'second'),
         ],
-        clip_group=ClipGroup(universe=Universe.EAST, year=2024, season=Season.S1),
-        clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+        group=ClipGroup(universe=Universe.EAST, year=2024, season=Season.S1),
+        sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
     )
 
     assert result.stored_count == 2
@@ -953,8 +953,8 @@ async def test_store_deduplicates_same_call_by_video_hash_and_keeps_dense_order(
             Clip(filename='second.mp4', bytes=b'second'),
             Clip(filename='third.mp4', bytes=b'third'),
         ],
-        clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-        clip_sub_group=ClipSubGroup(sub_season=SubSeason.C, scope=Scope.SOURCE),
+        group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+        sub_group=ClipSubGroup(sub_season=SubSeason.C, scope=Scope.SOURCE),
     )
 
     assert result == StoreResult(
@@ -1004,13 +1004,13 @@ async def test_store_creates_new_batch_per_call_and_resets_order(monkeypatch: py
             Clip(filename='first.mp4', bytes=b'first'),
             Clip(filename='second.mp4', bytes=b'second'),
         ],
-        clip_group=clip_group,
-        clip_sub_group=clip_sub_group,
+        group=clip_group,
+        sub_group=clip_sub_group,
     )
     second_result = await store.store(
         [Clip(filename='third.mp4', bytes=b'third')],
-        clip_group=clip_group,
-        clip_sub_group=clip_sub_group,
+        group=clip_group,
+        sub_group=clip_sub_group,
     )
 
     assert first_result == StoreResult(
@@ -1070,8 +1070,8 @@ async def test_store_all_duplicates_do_not_create_new_batch(monkeypatch: pytest.
 
     result = await store.store(
         [Clip(filename='incoming.mp4', bytes=b'clip')],
-        clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-        clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+        group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+        sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
     )
 
     assert result == StoreResult(stored_count=0, duplicate_count=1)
@@ -1252,8 +1252,8 @@ async def test_reconcile_reorders_and_rebatches_target_sub_group() -> None:
             ],
             [ClipStore._s3_key_to_filename(clip_key_2)],
         ],
-        clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-        clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+        group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+        sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
     )
 
     assert result == ReconcileResult(updated=3, removed=0)
@@ -1339,9 +1339,11 @@ async def test_reconcile_moves_from_other_sub_group_and_deletes_omitted_clip() -
     store = ClipStore(s3_client)
 
     result = await store.reconcile(
-        [[ClipStore._s3_key_to_filename(clip_key_3), ClipStore._s3_key_to_filename(clip_key_2)]],
-        clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-        clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+        [
+            [ClipStore._s3_key_to_filename(clip_key_3), ClipStore._s3_key_to_filename(clip_key_2)],
+        ],
+        group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+        sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
     )
 
     assert result == ReconcileResult(updated=2, removed=1)
@@ -1393,8 +1395,8 @@ async def test_reconcile_rejects_duplicate_filenames() -> None:
     with pytest.raises(DuplicateFilenamesError):
         await store.reconcile(
             [[ClipStore._s3_key_to_filename(clip_key), ClipStore._s3_key_to_filename(clip_key)]],
-            clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-            clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+            group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+            sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
         )
 
 
@@ -1405,8 +1407,8 @@ async def test_reconcile_rejects_empty_filename_batches() -> None:
     with pytest.raises(ValueError, match='`filename_batches` must contain at least one filename'):
         await store.reconcile(
             [[]],
-            clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-            clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+            group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+            sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
         )
 
 
@@ -1435,8 +1437,8 @@ async def test_reconcile_rejects_invalid_filename() -> None:
     with pytest.raises(InvalidFilenamesError, match='incoming.mp4'):
         await store.reconcile(
             [['incoming.mp4']],
-            clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-            clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+            group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+            sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
         )
 
 
@@ -1466,8 +1468,8 @@ async def test_reconcile_rejects_clip_from_other_group() -> None:
     with pytest.raises(ValueError, match='provided `clip_group`'):
         await store.reconcile(
             [[ClipStore._s3_key_to_filename(other_group_clip_key)]],
-            clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-            clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+            group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+            sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
         )
 
 
@@ -1508,8 +1510,8 @@ async def test_reconcile_updates_cache_even_if_removed_delete_fails() -> None:
     with pytest.raises(ReconcileDeleteError, match=clip_key_1) as excinfo:
         await store.reconcile(
             [[ClipStore._s3_key_to_filename(clip_key_2)]],
-            clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-            clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+            group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+            sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
         )
 
     assert excinfo.value.failed_keys == (clip_key_1,)
@@ -1541,8 +1543,8 @@ async def test_compact_rejects_batch_size_below_one() -> None:
 
     with pytest.raises(ValueError, match='`batch_size` must be >= 1'):
         await store.compact(
-            clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-            clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+            ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+            ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
             batch_size=0,
         )
 
@@ -1553,8 +1555,8 @@ async def test_compact_fails_with_empty_sub_group_fields_when_group_is_missing()
 
     with pytest.raises(ClipGroupNotFoundError) as excinfo:
         await store.compact(
-            clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-            clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+            ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+            ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
             batch_size=2,
         )
 
@@ -1589,8 +1591,8 @@ async def test_compact_fails_with_requested_sub_group_fields_when_sub_group_is_m
 
     with pytest.raises(ClipGroupNotFoundError) as excinfo:
         await store.compact(
-            clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-            clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+            ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+            ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
             batch_size=2,
         )
 
@@ -1657,8 +1659,8 @@ async def test_compact_preserves_relative_order_while_rewriting_positions() -> N
     clip_sub_group = ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION)
 
     await store.compact(
-        clip_group=clip_group,
-        clip_sub_group=clip_sub_group,
+        clip_group,
+        clip_sub_group,
         batch_size=2,
     )
 
@@ -1722,8 +1724,8 @@ async def test_compact_only_affects_specified_sub_group_and_leaves_others_unchan
     store = ClipStore(s3_client)
 
     await store.compact(
-        clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-        clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+        ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+        ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
         batch_size=2,
     )
 
@@ -1767,8 +1769,8 @@ async def test_compact_does_not_upload_manifest_when_positions_do_not_change() -
     store = ClipStore(s3_client)
 
     await store.compact(
-        clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-        clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+        ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+        ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
         batch_size=2,
     )
 
@@ -1802,8 +1804,8 @@ async def test_compact_updates_manifest_cache_consistently_after_rewrite() -> No
     clip_sub_group = ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION)
 
     await store.compact(
-        clip_group=clip_group,
-        clip_sub_group=clip_sub_group,
+        clip_group,
+        clip_sub_group,
         batch_size=2,
     )
 
@@ -1820,8 +1822,8 @@ async def test_compact_updates_manifest_cache_consistently_after_rewrite() -> No
 
     s3_client.objects[manifest_key] = _manifest_bytes(original_manifest)
     await store.compact(
-        clip_group=clip_group,
-        clip_sub_group=clip_sub_group,
+        clip_group,
+        clip_sub_group,
         batch_size=2,
     )
 
@@ -1862,8 +1864,8 @@ async def test_compact_is_manifest_only_and_does_not_touch_clip_objects() -> Non
     store = ClipStore(s3_client)
 
     await store.compact(
-        clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-        clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+        ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+        ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
         batch_size=2,
     )
 
@@ -1888,18 +1890,18 @@ async def test_compact_can_pull_newly_stored_single_clip_into_previous_batch_whe
 
     await store.store(
         [Clip(filename='first.mp4', bytes=b'first')],
-        clip_group=clip_group,
-        clip_sub_group=clip_sub_group,
+        group=clip_group,
+        sub_group=clip_sub_group,
     )
     await store.store(
         [Clip(filename='second.mp4', bytes=b'second')],
-        clip_group=clip_group,
-        clip_sub_group=clip_sub_group,
+        group=clip_group,
+        sub_group=clip_sub_group,
     )
 
     await store.compact(
-        clip_group=clip_group,
-        clip_sub_group=clip_sub_group,
+        clip_group,
+        clip_sub_group,
         batch_size=2,
     )
 
@@ -1941,8 +1943,8 @@ async def test_compact_with_batch_size_ten_creates_dense_batches_with_final_part
     store = ClipStore(s3_client)
 
     await store.compact(
-        clip_group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-        clip_sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+        ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+        ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
         batch_size=10,
     )
 

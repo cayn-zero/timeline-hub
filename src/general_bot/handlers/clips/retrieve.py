@@ -664,8 +664,8 @@ async def _send_retrieve_scopes(
             bot=bot,
             chat_id=chat_id,
             clip_batches=services.clip_store.fetch(
-                clip_group=clip_group,
-                clip_sub_group=ClipSubGroup(sub_season=sub_season, scope=scope),
+                clip_group,
+                ClipSubGroup(sub_season=sub_season, scope=scope),
             ),
             settings=settings,
             normalize_audio=normalize_audio,
