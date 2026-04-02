@@ -82,6 +82,42 @@ class TrackGroup:
     season: Season
 
 
+@dataclass(frozen=True, slots=True)
+class Track:
+    """Original track payload for storage."""
+
+    artists: tuple[str, ...]
+    title: str
+    audio_bytes: bytes
+    cover_bytes: bytes
+
+    def __post_init__(self) -> None:
+        """Validate original track invariants for all construction paths."""
+        if not isinstance(self.artists, tuple):
+            raise ValueError('Track.artists must be a tuple')
+        if not self.artists:
+            raise ValueError('Track.artists must not be empty')
+        if any(not isinstance(artist, str) for artist in self.artists):
+            raise ValueError('Track.artists entries must be strings')
+        if any(not artist.strip() for artist in self.artists):
+            raise ValueError('Track.artists entries must be non-empty strings')
+
+        if not isinstance(self.title, str):
+            raise ValueError('Track.title must be a string')
+        if not self.title.strip():
+            raise ValueError('Track.title must be a non-empty string')
+
+        if not isinstance(self.audio_bytes, bytes):
+            raise ValueError('Track.audio_bytes must be bytes')
+        if not self.audio_bytes:
+            raise ValueError('Track.audio_bytes must not be empty')
+
+        if not isinstance(self.cover_bytes, bytes):
+            raise ValueError('Track.cover_bytes must be bytes')
+        if not self.cover_bytes:
+            raise ValueError('Track.cover_bytes must not be empty')
+
+
 class SubSeason(StrEnum):
     """Track sub-season identifier."""
 
@@ -295,6 +331,8 @@ class ManifestEntry:
     """
 
     id: TrackId
+    artists: tuple[str, ...]
+    title: str
     sub_season: SubSeason
     order: int
     preset: AppliedPreset | None
@@ -340,6 +378,8 @@ class Manifest:
         return [
             {
                 'id': entry.id,
+                'artists': list(entry.artists),
+                'title': entry.title,
                 'sub_season': entry.sub_season.value,
                 'order': entry.order,
                 'preset': _applied_preset_to_dict(entry.preset),
@@ -368,7 +408,7 @@ class Manifest:
         for raw_entry in data:
             if not isinstance(raw_entry, dict):
                 raise ValueError('manifest track entry must be an object')
-            if set(raw_entry) != {'id', 'sub_season', 'order', 'preset', 'has_instrumental'}:
+            if set(raw_entry) != {'id', 'artists', 'title', 'sub_season', 'order', 'preset', 'has_instrumental'}:
                 raise ValueError('manifest track entry has unexpected fields')
 
             track_id = _parse_uuid7(
@@ -376,6 +416,8 @@ class Manifest:
                 field='id',
                 context='manifest',
             )
+            artists = _parse_track_artists(raw_entry['artists'], context='manifest')
+            title = _expect_non_empty_str(raw_entry['title'], field='title', context='manifest')
             sub_season = _parse_enum(raw_entry['sub_season'], SubSeason, field='sub_season', context='manifest')
             order = _expect_positive_int(raw_entry['order'], field='order', context='manifest')
             preset = _parse_applied_preset(raw_entry['preset'])
@@ -395,6 +437,8 @@ class Manifest:
             entries.append(
                 ManifestEntry(
                     id=track_id,
+                    artists=artists,
+                    title=title,
                     sub_season=sub_season,
                     order=order,
                     preset=preset,
@@ -482,15 +526,14 @@ class TrackStore:
 
     async def store(
         self,
-        track_bytes: bytes,
-        cover_bytes: bytes,
+        track: Track,
         *,
         group: TrackGroup,
         sub_season: SubSeason,
     ) -> None:
         """Store one original track plus its mandatory cover object.
 
-        `track_bytes` must already be Opus data and `cover_bytes` must already
+        `track.audio_bytes` must already be Opus data and `track.cover_bytes` must already
         be JPEG data. This phase treats those media formats as a caller
         contract and does not perform expensive media validation.
 
@@ -526,6 +569,8 @@ class TrackStore:
         manifest.append(
             ManifestEntry(
                 id=track_id,
+                artists=track.artists,
+                title=track.title,
                 sub_season=sub_season,
                 order=order,
                 preset=None,
@@ -542,14 +587,14 @@ class TrackStore:
         try:
             await self._s3_client.put_bytes(
                 track_key,
-                track_bytes,
+                track.audio_bytes,
                 content_type=S3ContentType.OPUS,
             )
             uploaded_keys.append(track_key)
 
             await self._s3_client.put_bytes(
                 cover_key,
-                cover_bytes,
+                track.cover_bytes,
                 content_type=S3ContentType.JPEG,
             )
             uploaded_keys.append(cover_key)
@@ -881,6 +926,23 @@ def _parse_applied_preset(value: object) -> AppliedPreset | None:
         id=_expect_positive_int(value['id'], field='preset.id', context='manifest'),
         version=_expect_positive_int(value['version'], field='preset.version', context='manifest'),
     )
+
+
+def _parse_track_artists(value: object, *, context: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ValueError(f'{context} `artists` must be a list')
+    if not value:
+        raise ValueError(f'{context} `artists` must not be empty')
+
+    artists = tuple(_expect_non_empty_str(artist, field='artists[]', context=context) for artist in value)
+    return artists
+
+
+def _expect_non_empty_str(value: object, *, field: str, context: str) -> str:
+    parsed = _expect_str(value, field=field, context=context)
+    if not parsed.strip():
+        raise ValueError(f'{context} `{field}` must be a non-empty string')
+    return parsed
 
 
 def _expect_str(value: object, *, field: str, context: str) -> str:
