@@ -47,8 +47,8 @@ from general_bot.handlers.clips.flow import (
     validate_menu_flow_state,
     year_option_universe,
 )
-from general_bot.infra.ffmpeg import normalize_audio_loudness
 from general_bot.services.clip_store import (
+    AudioNormalization,
     Clip,
     ClipGroup,
     ClipGroupNotFoundError,
@@ -656,6 +656,8 @@ async def _send_retrieve_scopes(
     settings: Settings,
     normalize_audio: bool,
 ) -> None:
+    audio_normalization = _audio_normalization(settings=settings) if normalize_audio else None
+
     for index, scope in enumerate(scopes):
         if index > 0:
             await bot.send_message(chat_id=chat_id, text='.')
@@ -666,9 +668,8 @@ async def _send_retrieve_scopes(
             clip_batches=services.clip_store.fetch(
                 clip_group,
                 ClipSubGroup(sub_season=sub_season, scope=scope),
+                audio_normalization=audio_normalization,
             ),
-            settings=settings,
-            normalize_audio=normalize_audio,
         )
 
     await bot.send_message(chat_id=chat_id, text='Done')
@@ -679,14 +680,9 @@ async def _send_fetched_clip_batches(
     bot: Bot,
     chat_id: ChatId,
     clip_batches: AsyncIterator[list[Clip]],
-    settings: Settings,
-    normalize_audio: bool,
 ) -> None:
     async for batch in clip_batches:
-        clips = batch
-        if normalize_audio:
-            clips = await _normalize_clip_batch(clips=clips, settings=settings)
-        await _send_stored_clip_batch(bot=bot, chat_id=chat_id, clips=clips)
+        await _send_stored_clip_batch(bot=bot, chat_id=chat_id, clips=batch)
 
 
 async def _send_stored_clip_batch(
@@ -715,31 +711,6 @@ async def _send_stored_clip_batch(
             for clip in clips
         ],
     )
-
-
-async def _normalize_clip_batch(
-    *,
-    clips: Sequence[Clip],
-    settings: Settings,
-) -> list[Clip]:
-    """Normalize fetched clip audio in memory before sending.
-
-    Preserves clip order inside the fetched batch and never mutates stored
-    clip objects in S3.
-    """
-    normalized_clips: list[Clip] = []
-    for clip in clips:
-        normalized_clips.append(
-            Clip(
-                filename=clip.filename,
-                bytes=await normalize_audio_loudness(
-                    clip.bytes,
-                    loudness=settings.normalization_loudness,
-                    bitrate=settings.normalization_bitrate,
-                ),
-            )
-        )
-    return normalized_clips
 
 
 async def _retrieve_sub_groups(
@@ -803,6 +774,13 @@ def _flow_for_mode(mode: object) -> FlowMenuDefinition | None:
 
 def _normalizes_audio(flow: FlowMenuDefinition) -> bool:
     return flow is _GET_FLOW
+
+
+def _audio_normalization(*, settings: Settings) -> AudioNormalization:
+    return AudioNormalization(
+        loudness=settings.normalization_loudness,
+        bitrate=settings.normalization_bitrate,
+    )
 
 
 def should_normalize_audio(*, settings: Settings) -> bool:

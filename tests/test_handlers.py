@@ -58,6 +58,7 @@ from general_bot.handlers.clips.retrieve import (
 )
 from general_bot.handlers.router import on_dummy_button
 from general_bot.services.clip_store import (
+    AudioNormalization,
     Clip,
     ClipGroup,
     ClipSubGroup,
@@ -140,18 +141,24 @@ class _RetrieveClipStore:
         sub_groups: list[ClipSubGroup] | None = None,
     ) -> None:
         self.batches_by_scope = batches_by_scope
-        self.calls: list[tuple[ClipGroup, ClipSubGroup, tuple[str, ...] | None]] = []
+        self.calls: list[tuple[ClipGroup, ClipSubGroup, tuple[str, ...] | None, AudioNormalization | None]] = []
         self.sub_groups = list(sub_groups or [])
 
     async def fetch(
         self,
         group: ClipGroup,
         sub_group: ClipSubGroup,
+        *,
         clip_ids=None,
+        audio_normalization: AudioNormalization | None = None,
     ):
-        self.calls.append((group, sub_group, None if clip_ids is None else tuple(clip_ids)))
+        self.calls.append((group, sub_group, None if clip_ids is None else tuple(clip_ids), audio_normalization))
         for batch in self.batches_by_scope[sub_group.scope]:
-            yield batch
+            if audio_normalization is None:
+                yield batch
+                continue
+
+            yield [Clip(filename=clip.filename, bytes=b'normalized:' + clip.bytes) for clip in batch]
 
     async def list_sub_groups(self, group: ClipGroup) -> list[ClipSubGroup]:
         return list(self.sub_groups)
@@ -174,7 +181,7 @@ class _ProduceClipStore:
         self.events: list[tuple[str, object]] = []
         self._store_results = iter(store_results)
         self._fetched_batches = fetched_batches
-        self.fetch_calls: list[tuple[ClipGroup, ClipSubGroup, tuple[str, ...] | None]] = []
+        self.fetch_calls: list[tuple[ClipGroup, ClipSubGroup, tuple[str, ...] | None, AudioNormalization | None]] = []
 
     async def store(self, clips, *, group: ClipGroup, sub_group: ClipSubGroup) -> StoreResult:
         self.events.append(('store', ([clip.filename for clip in clips], group, sub_group)))
@@ -193,12 +200,20 @@ class _ProduceClipStore:
         self,
         group: ClipGroup,
         sub_group: ClipSubGroup,
+        *,
         clip_ids=None,
+        audio_normalization: AudioNormalization | None = None,
     ):
-        self.fetch_calls.append((group, sub_group, None if clip_ids is None else tuple(clip_ids)))
-        self.events.append(('fetch', (group, sub_group, None if clip_ids is None else tuple(clip_ids))))
+        self.fetch_calls.append((group, sub_group, None if clip_ids is None else tuple(clip_ids), audio_normalization))
+        self.events.append(
+            ('fetch', (group, sub_group, None if clip_ids is None else tuple(clip_ids), audio_normalization))
+        )
         for batch in self._fetched_batches:
-            yield batch
+            if audio_normalization is None:
+                yield batch
+                continue
+
+            yield [Clip(filename=clip.filename, bytes=b'normalized:' + clip.bytes) for clip in batch]
 
 
 def _services(
@@ -2926,6 +2941,7 @@ async def test_pull_scope_all_with_one_scope_sends_single_scope_normally() -> No
             ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
             ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.COLLECTION),
             None,
+            None,
         )
     ]
     assert bot.events == [
@@ -2936,7 +2952,7 @@ async def test_pull_scope_all_with_one_scope_sends_single_scope_normally() -> No
 
 
 @pytest.mark.asyncio
-async def test_get_scope_all_normalizes_before_sending(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_scope_all_requests_normalized_fetch_before_sending() -> None:
     message = _fake_message(chat_id=9, message_id=742)
     callback = _fake_callback(message)
     state = _FakeState()
@@ -2957,13 +2973,6 @@ async def test_get_scope_all_normalizes_before_sending(monkeypatch: pytest.Monke
     )
     services = _services(clip_store=clip_store)
 
-    async def _fake_normalize(video_bytes: bytes, *, loudness: float, bitrate: int) -> bytes:
-        assert loudness == -14
-        assert bitrate == 128
-        return b'normalized:' + video_bytes
-
-    monkeypatch.setattr(retrieve_module, 'normalize_audio_loudness', _fake_normalize)
-
     await on_retrieve_menu(
         callback,
         RetrieveCallbackData(action=MenuAction.SELECT, step=MenuStep.SCOPE, value=ALL_SCOPES_CALLBACK_VALUE),
@@ -2977,6 +2986,14 @@ async def test_get_scope_all_normalizes_before_sending(monkeypatch: pytest.Monke
         message.edit_text.await_args.kwargs,
         _selected_kwargs('Get', 'West', '2024', '1', 'All'),
     )
+    assert clip_store.calls == [
+        (
+            ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+            ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.COLLECTION),
+            None,
+            AudioNormalization(loudness=-14, bitrate=128),
+        )
+    ]
     assert bot.send_video.await_args.kwargs['video'].filename == 'one.mp4'
     assert bot.send_video.await_args.kwargs['video'].data == b'normalized:one'
     bot.send_message.assert_awaited_with(chat_id=9, text='Done')
@@ -3290,12 +3307,6 @@ async def test_produce_scope_selection_stores_then_fetches_only_new_subset_via_s
     ]
     bot.download_file.side_effect = [BytesIO(b'one'), BytesIO(b'two'), BytesIO(b'three')]
 
-    async def _fake_normalize(video_bytes: bytes, *, loudness: float, bitrate: int) -> bytes:
-        assert loudness == -14
-        assert bitrate == 128
-        return b'normalized:' + video_bytes
-
-    monkeypatch.setattr(retrieve_module, 'normalize_audio_loudness', _fake_normalize)
     shared_helper = AsyncMock(side_effect=retrieve_module._send_fetched_clip_batches)
     monkeypatch.setattr(intake_module, '_send_fetched_clip_batches', shared_helper)
 
@@ -3327,10 +3338,10 @@ async def test_produce_scope_selection_stores_then_fetches_only_new_subset_via_s
             ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
             ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.EXTRA),
             ('id-1', 'id-2', 'id-3'),
+            AudioNormalization(loudness=-14, bitrate=128),
         )
     ]
     shared_helper.assert_awaited_once()
-    assert shared_helper.await_args.kwargs['normalize_audio'] is True
     assert bot.send_video.await_args.kwargs['video'].data == b'normalized:one'
     sent_media = bot.send_media_group.await_args.kwargs['media']
     assert [item.media.data for item in sent_media] == [b'normalized:two', b'normalized:three']
@@ -3956,10 +3967,12 @@ async def test_send_retrieve_scopes_sends_separator_only_between_scope_blocks_an
             ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
             ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.COLLECTION),
             None,
+            None,
         ),
         (
             ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
             ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.EXTRA),
+            None,
             None,
         ),
     ]
@@ -3972,9 +3985,7 @@ async def test_send_retrieve_scopes_sends_separator_only_between_scope_blocks_an
 
 
 @pytest.mark.asyncio
-async def test_send_retrieve_scopes_normalizes_clips_in_memory_before_send(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_send_retrieve_scopes_requests_normalized_fetch_and_sends_results() -> None:
     bot = AsyncMock()
     clip_store = _RetrieveClipStore(
         {
@@ -3989,13 +4000,6 @@ async def test_send_retrieve_scopes_normalizes_clips_in_memory_before_send(
     )
     services = _services(clip_store=clip_store)
 
-    async def _fake_normalize(video_bytes: bytes, *, loudness: float, bitrate: int) -> bytes:
-        assert loudness == -13
-        assert bitrate == 160
-        return video_bytes.upper()
-
-    monkeypatch.setattr(retrieve_module, 'normalize_audio_loudness', _fake_normalize)
-
     await _send_retrieve_scopes(
         bot=bot,
         chat_id=9,
@@ -4007,11 +4011,19 @@ async def test_send_retrieve_scopes_normalizes_clips_in_memory_before_send(
         normalize_audio=True,
     )
 
+    assert clip_store.calls == [
+        (
+            ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
+            ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.COLLECTION),
+            None,
+            AudioNormalization(loudness=-13, bitrate=160),
+        )
+    ]
     assert bot.send_video.await_args.kwargs['video'].filename == 'one.mp4'
-    assert bot.send_video.await_args.kwargs['video'].data == b'ONE'
+    assert bot.send_video.await_args.kwargs['video'].data == b'normalized:one'
     sent_media = bot.send_media_group.await_args.kwargs['media']
     assert [item.media.filename for item in sent_media] == ['two.mp4', 'three.mp4']
-    assert [item.media.data for item in sent_media] == [b'TWO', b'THREE']
+    assert [item.media.data for item in sent_media] == [b'normalized:two', b'normalized:three']
     assert clip_store.batches_by_scope[Scope.COLLECTION] == [
         [Clip(filename='one.mp4', bytes=b'one')],
         [
@@ -4022,9 +4034,7 @@ async def test_send_retrieve_scopes_normalizes_clips_in_memory_before_send(
 
 
 @pytest.mark.asyncio
-async def test_send_retrieve_scopes_propagates_normalization_failure_without_sending(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_send_retrieve_scopes_sends_raw_batches_when_normalization_is_disabled() -> None:
     bot = AsyncMock()
     services = _services(
         clip_store=_RetrieveClipStore(
@@ -4036,26 +4046,27 @@ async def test_send_retrieve_scopes_propagates_normalization_failure_without_sen
         )
     )
 
-    async def _failing_normalize(video_bytes: bytes, *, loudness: float, bitrate: int) -> bytes:
-        raise RuntimeError(f'boom: {video_bytes!r}')
+    await _send_retrieve_scopes(
+        bot=bot,
+        chat_id=9,
+        services=services,
+        clip_group=ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
+        sub_season=SubSeason.NONE,
+        scopes=[Scope.COLLECTION],
+        settings=_settings(),
+        normalize_audio=False,
+    )
 
-    monkeypatch.setattr(retrieve_module, 'normalize_audio_loudness', _failing_normalize)
-
-    with pytest.raises(RuntimeError, match="boom: b'one'"):
-        await _send_retrieve_scopes(
-            bot=bot,
-            chat_id=9,
-            services=services,
-            clip_group=ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
-            sub_season=SubSeason.NONE,
-            scopes=[Scope.COLLECTION],
-            settings=_settings(),
-            normalize_audio=True,
+    assert services.clip_store.calls == [
+        (
+            ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
+            ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.COLLECTION),
+            None,
+            None,
         )
-
-    bot.send_video.assert_not_awaited()
-    bot.send_media_group.assert_not_awaited()
-    bot.send_message.assert_not_awaited()
+    ]
+    assert bot.send_video.await_args.kwargs['video'].data == b'one'
+    bot.send_message.assert_awaited_once_with(chat_id=9, text='Done')
 
 
 @pytest.mark.asyncio

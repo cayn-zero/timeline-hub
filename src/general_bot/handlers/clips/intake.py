@@ -56,8 +56,12 @@ from general_bot.handlers.clips.flow import (
     validate_menu_flow_state,
     year_option_universe,
 )
-from general_bot.handlers.clips.retrieve import _send_fetched_clip_batches, should_normalize_audio
+from general_bot.handlers.clips.retrieve import (
+    _send_fetched_clip_batches,
+    should_normalize_audio,
+)
 from general_bot.services.clip_store import (
+    AudioNormalization,
     Clip,
     ClipGroup,
     ClipSubGroup,
@@ -856,9 +860,15 @@ async def _on_store_select(
                             clip_group,
                             clip_sub_group,
                             clip_ids=result.clip_ids,
+                            audio_normalization=(
+                                AudioNormalization(
+                                    loudness=settings.normalization_loudness,
+                                    bitrate=settings.normalization_bitrate,
+                                )
+                                if should_normalize_audio(settings=settings)
+                                else None
+                            ),
                         ),
-                        settings=settings,
-                        normalize_audio=should_normalize_audio(settings=settings),
                     )
                     await bot.send_message(chat_id=message.chat.id, text='Done')
                 return

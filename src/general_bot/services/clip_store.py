@@ -1,12 +1,13 @@
 import itertools
 import json
+import math
 import uuid
 from collections.abc import AsyncIterator, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
 from typing import Any, Self, TypeVar
 
-from general_bot.infra.ffmpeg import hash_video_content
+from general_bot.infra.ffmpeg import hash_video_content, normalize_audio_loudness
 from general_bot.infra.s3 import Key, Prefix, S3Client, S3ContentType, S3ObjectNotFoundError
 
 _CLIPS_PREFIX = 'clips'
@@ -115,6 +116,24 @@ class Clip:
 
     filename: str
     bytes: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class AudioNormalization:
+    """Audio-normalization settings applied during clip fetch."""
+
+    loudness: float
+    bitrate: int
+
+    def __post_init__(self) -> None:
+        if isinstance(self.loudness, bool) or not isinstance(self.loudness, int | float):
+            raise ValueError('`loudness` must be a numeric value')
+        if not math.isfinite(self.loudness):
+            raise ValueError('`loudness` must be finite')
+        if isinstance(self.bitrate, bool) or not isinstance(self.bitrate, int):
+            raise ValueError('`bitrate` must be an integer')
+        if self.bitrate < 1:
+            raise ValueError('`bitrate` must be >= 1')
 
 
 @dataclass(frozen=True, slots=True)
@@ -801,6 +820,7 @@ class ClipStore:
         sub_group: ClipSubGroup,
         *,
         clip_ids: Sequence[ClipId] | None = None,
+        audio_normalization: AudioNormalization | None = None,
     ) -> AsyncIterator[list[Clip]]:
         """Fetch clips for a clip sub-group in preserved batch order.
 
@@ -880,6 +900,18 @@ class ClipStore:
                 clip_key = self._clip_key(clip_group_prefix, entry.id)
                 clip_bytes = await self._s3_client.get_bytes(clip_key)
                 clip_batch.append(Clip(filename=self._s3_key_to_filename(clip_key), bytes=clip_bytes))
+            if audio_normalization is not None:
+                clip_batch = [
+                    Clip(
+                        filename=clip.filename,
+                        bytes=await normalize_audio_loudness(
+                            clip.bytes,
+                            loudness=audio_normalization.loudness,
+                            bitrate=audio_normalization.bitrate,
+                        ),
+                    )
+                    for clip in clip_batch
+                ]
             yield clip_batch
 
     async def list_groups(self) -> list[ClipGroup]:

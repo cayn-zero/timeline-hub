@@ -6,6 +6,7 @@ import pytest
 import general_bot.services.clip_store as clip_store_module
 from general_bot.infra.s3 import S3Client, S3ObjectNotFoundError
 from general_bot.services.clip_store import (
+    AudioNormalization,
     Clip,
     ClipGroup,
     ClipGroupNotFoundError,
@@ -50,6 +51,26 @@ def test_store_result_adds_counts() -> None:
         duplicate_count=6,
         clip_ids=(_UUID_1, _UUID_2, _UUID_3),
     )
+
+
+@pytest.mark.parametrize(
+    ('kwargs', 'expected_message'),
+    [
+        ({'loudness': True, 'bitrate': 128}, '`loudness` must be a numeric value'),
+        ({'loudness': 'loud', 'bitrate': 128}, '`loudness` must be a numeric value'),
+        ({'loudness': float('inf'), 'bitrate': 128}, '`loudness` must be finite'),
+        ({'loudness': float('nan'), 'bitrate': 128}, '`loudness` must be finite'),
+        ({'loudness': -14, 'bitrate': True}, '`bitrate` must be an integer'),
+        ({'loudness': -14, 'bitrate': 128.0}, '`bitrate` must be an integer'),
+        ({'loudness': -14, 'bitrate': 0}, '`bitrate` must be >= 1'),
+    ],
+)
+def test_audio_normalization_rejects_invalid_values(
+    kwargs: dict[str, object],
+    expected_message: str,
+) -> None:
+    with pytest.raises(ValueError, match=expected_message):
+        AudioNormalization(**kwargs)
 
 
 def test_season_from_month_uses_exact_mapping() -> None:
@@ -233,7 +254,9 @@ def test_manifest_rejects_duplicate_batch_order_position() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_returns_grouped_clips_with_portable_filenames() -> None:
+async def test_fetch_returns_grouped_clips_with_portable_filenames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     manifest_key = _manifest_key(year=2024, season=Season.S1, universe=Universe.WEST)
     clip_key_1 = _clip_key(year=2024, season=Season.S1, universe=Universe.WEST, clip_id=_UUID_1)
     clip_key_2 = _clip_key(year=2024, season=Season.S1, universe=Universe.WEST, clip_id=_UUID_2)
@@ -285,11 +308,17 @@ async def test_fetch_returns_grouped_clips_with_portable_filenames() -> None:
     )
     store = ClipStore(s3_client)
 
+    async def _unexpected_normalize(video_bytes: bytes, *, loudness: float, bitrate: int) -> bytes:
+        raise AssertionError('raw fetch must not normalize audio')
+
+    monkeypatch.setattr(clip_store_module, 'normalize_audio_loudness', _unexpected_normalize)
+
     batches = [
         batch
         async for batch in store.fetch(
             ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
             ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+            audio_normalization=None,
         )
     ]
 
@@ -301,6 +330,95 @@ async def test_fetch_returns_grouped_clips_with_portable_filenames() -> None:
         [
             Clip(filename=ClipStore._s3_key_to_filename(clip_key_3), bytes=b'batch-2-first'),
             Clip(filename=ClipStore._s3_key_to_filename(clip_key_4), bytes=b'batch-2-second'),
+        ],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_with_audio_normalization_normalizes_bytes_and_preserves_structure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_key = _manifest_key(year=2024, season=Season.S1, universe=Universe.WEST)
+    clip_key_1 = _clip_key(year=2024, season=Season.S1, universe=Universe.WEST, clip_id=_UUID_1)
+    clip_key_2 = _clip_key(year=2024, season=Season.S1, universe=Universe.WEST, clip_id=_UUID_2)
+    clip_key_3 = _clip_key(year=2024, season=Season.S1, universe=Universe.WEST, clip_id=_UUID_3)
+    clip_key_4 = _clip_key(year=2024, season=Season.S1, universe=Universe.WEST, clip_id=_UUID_4)
+    s3_client = _FakeS3Client(
+        {
+            manifest_key: _manifest_bytes(
+                [
+                    ManifestEntry(
+                        id=_UUID_1,
+                        video_hash=_HASH_A,
+                        sub_season=SubSeason.A,
+                        scope=Scope.COLLECTION,
+                        batch=1,
+                        order=1,
+                    ),
+                    ManifestEntry(
+                        id=_UUID_2,
+                        video_hash=_HASH_B,
+                        sub_season=SubSeason.A,
+                        scope=Scope.COLLECTION,
+                        batch=1,
+                        order=2,
+                    ),
+                    ManifestEntry(
+                        id=_UUID_3,
+                        video_hash=_HASH_C,
+                        sub_season=SubSeason.A,
+                        scope=Scope.COLLECTION,
+                        batch=2,
+                        order=1,
+                    ),
+                    ManifestEntry(
+                        id=_UUID_4,
+                        video_hash=_HASH_D,
+                        sub_season=SubSeason.A,
+                        scope=Scope.COLLECTION,
+                        batch=2,
+                        order=2,
+                    ),
+                ]
+            ),
+            clip_key_1: b'batch-1-first',
+            clip_key_2: b'batch-1-second',
+            clip_key_3: b'batch-2-first',
+            clip_key_4: b'batch-2-second',
+        }
+    )
+    store = ClipStore(s3_client)
+    calls: list[tuple[bytes, float, int]] = []
+
+    async def _fake_normalize(video_bytes: bytes, *, loudness: float, bitrate: int) -> bytes:
+        calls.append((video_bytes, loudness, bitrate))
+        return b'normalized:' + video_bytes
+
+    monkeypatch.setattr(clip_store_module, 'normalize_audio_loudness', _fake_normalize)
+
+    batches = [
+        batch
+        async for batch in store.fetch(
+            ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+            ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+            audio_normalization=AudioNormalization(loudness=-14, bitrate=128),
+        )
+    ]
+
+    assert calls == [
+        (b'batch-1-first', -14, 128),
+        (b'batch-1-second', -14, 128),
+        (b'batch-2-first', -14, 128),
+        (b'batch-2-second', -14, 128),
+    ]
+    assert batches == [
+        [
+            Clip(filename=ClipStore._s3_key_to_filename(clip_key_1), bytes=b'normalized:batch-1-first'),
+            Clip(filename=ClipStore._s3_key_to_filename(clip_key_2), bytes=b'normalized:batch-1-second'),
+        ],
+        [
+            Clip(filename=ClipStore._s3_key_to_filename(clip_key_3), bytes=b'normalized:batch-2-first'),
+            Clip(filename=ClipStore._s3_key_to_filename(clip_key_4), bytes=b'normalized:batch-2-second'),
         ],
     ]
 
