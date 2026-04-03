@@ -18,6 +18,7 @@ from general_bot.services.track_store import (
     Track,
     TrackGroup,
     TrackGroupNotFoundError,
+    TrackInstrumentalManifestSyncError,
     TrackManifestCorruptedError,
     TrackPresetsCorruptedError,
     TrackStore,
@@ -45,6 +46,7 @@ class _FakeS3Client:
         self.delete_failures = set(delete_failures or set())
         self.put_calls: list[tuple[str, bytes, str | None]] = []
         self.get_calls: list[str] = []
+        self.list_subprefixes_calls: list[str | None] = []
         self.deleted_keys: list[str] = []
 
     async def put_bytes(self, key: str, data: bytes, *, content_type: str | None = None) -> None:
@@ -61,6 +63,7 @@ class _FakeS3Client:
             raise S3ObjectNotFoundError(key) from error
 
     async def list_subprefixes(self, prefix: str | None = None) -> list[str]:
+        self.list_subprefixes_calls.append(prefix)
         if prefix is None:
             return list(self.prefixes)
 
@@ -96,6 +99,13 @@ def _track_key(*, universe: TrackUniverse, year: int, season: Season, track_id: 
 
 def _cover_key(*, universe: TrackUniverse, year: int, season: Season, track_id: str) -> str:
     return S3Client.join(_track_group_prefix(universe=universe, year=year, season=season), track_id + '-cover.jpg')
+
+
+def _instrumental_key(*, universe: TrackUniverse, year: int, season: Season, track_id: str) -> str:
+    return S3Client.join(
+        _track_group_prefix(universe=universe, year=year, season=season),
+        track_id + '-instrumental.opus',
+    )
 
 
 def _preset(
@@ -396,6 +406,7 @@ def test_manifest_uses_top_level_list_with_preferred_field_order() -> None:
         order=1,
         preset=None,
         has_instrumental=False,
+        has_instrumental_variants=False,
     )
 
     payload = Manifest([entry]).to_list()
@@ -409,9 +420,48 @@ def test_manifest_uses_top_level_list_with_preferred_field_order() -> None:
             'order': 1,
             'preset': None,
             'has_instrumental': False,
+            'has_instrumental_variants': False,
         }
     ]
-    assert list(payload[0]) == ['id', 'artists', 'title', 'sub_season', 'order', 'preset', 'has_instrumental']
+    assert list(payload[0]) == [
+        'id',
+        'artists',
+        'title',
+        'sub_season',
+        'order',
+        'preset',
+        'has_instrumental',
+        'has_instrumental_variants',
+    ]
+    assert list(Manifest.from_list(payload)) == [entry]
+
+
+def test_manifest_round_trips_has_instrumental_variants() -> None:
+    entry = ManifestEntry(
+        id=_UUID_1,
+        artists=('artist',),
+        title='title',
+        sub_season=SubSeason.A,
+        order=1,
+        preset=track_store_module.AppliedPreset(id=2, version=5),
+        has_instrumental=True,
+        has_instrumental_variants=True,
+    )
+
+    payload = Manifest([entry]).to_list()
+
+    assert payload == [
+        {
+            'id': _UUID_1,
+            'artists': ['artist'],
+            'title': 'title',
+            'sub_season': 'A',
+            'order': 1,
+            'preset': {'id': 2, 'version': 5},
+            'has_instrumental': True,
+            'has_instrumental_variants': True,
+        }
+    ]
     assert list(Manifest.from_list(payload)) == [entry]
 
 
@@ -426,6 +476,7 @@ def test_manifest_next_order_is_dense_per_sub_season() -> None:
                 order=1,
                 preset=None,
                 has_instrumental=False,
+                has_instrumental_variants=False,
             ),
             ManifestEntry(
                 id=_UUID_2,
@@ -435,6 +486,7 @@ def test_manifest_next_order_is_dense_per_sub_season() -> None:
                 order=1,
                 preset=None,
                 has_instrumental=False,
+                has_instrumental_variants=False,
             ),
             ManifestEntry(
                 id=_UUID_3,
@@ -444,6 +496,7 @@ def test_manifest_next_order_is_dense_per_sub_season() -> None:
                 order=2,
                 preset=None,
                 has_instrumental=True,
+                has_instrumental_variants=False,
             ),
         ]
     )
@@ -464,6 +517,7 @@ def test_manifest_rejects_duplicate_sub_season_order_position() -> None:
                     'order': 1,
                     'preset': None,
                     'has_instrumental': False,
+                    'has_instrumental_variants': False,
                 },
                 {
                     'id': _UUID_2,
@@ -473,6 +527,7 @@ def test_manifest_rejects_duplicate_sub_season_order_position() -> None:
                     'order': 1,
                     'preset': None,
                     'has_instrumental': True,
+                    'has_instrumental_variants': False,
                 },
             ]
         )
@@ -490,6 +545,43 @@ def test_manifest_rejects_invalid_preset_shape() -> None:
                     'order': 1,
                     'preset': {'preset_id': 2, 'version': 5},
                     'has_instrumental': False,
+                    'has_instrumental_variants': False,
+                }
+            ]
+        )
+
+
+def test_manifest_rejects_instrumental_variants_without_instrumental() -> None:
+    with pytest.raises(ValueError, match=r'manifest `has_instrumental_variants` requires `has_instrumental`'):
+        Manifest.from_list(
+            [
+                {
+                    'id': _UUID_1,
+                    'artists': ['artist'],
+                    'title': 'title',
+                    'sub_season': 'A',
+                    'order': 1,
+                    'preset': {'id': 2, 'version': 5},
+                    'has_instrumental': False,
+                    'has_instrumental_variants': True,
+                }
+            ]
+        )
+
+
+def test_manifest_rejects_instrumental_variants_without_preset() -> None:
+    with pytest.raises(ValueError, match=r'manifest `has_instrumental_variants` requires non-null `preset`'):
+        Manifest.from_list(
+            [
+                {
+                    'id': _UUID_1,
+                    'artists': ['artist'],
+                    'title': 'title',
+                    'sub_season': 'A',
+                    'order': 1,
+                    'preset': None,
+                    'has_instrumental': True,
+                    'has_instrumental_variants': True,
                 }
             ]
         )
@@ -507,6 +599,7 @@ def test_manifest_rejects_invalid_preset_shape() -> None:
                 'order': 1,
                 'preset': None,
                 'has_instrumental': False,
+                'has_instrumental_variants': False,
             },
             'manifest `artists` must be a list',
         ),
@@ -519,6 +612,7 @@ def test_manifest_rejects_invalid_preset_shape() -> None:
                 'order': 1,
                 'preset': None,
                 'has_instrumental': False,
+                'has_instrumental_variants': False,
             },
             'manifest `artists` must not be empty',
         ),
@@ -531,6 +625,7 @@ def test_manifest_rejects_invalid_preset_shape() -> None:
                 'order': 1,
                 'preset': None,
                 'has_instrumental': False,
+                'has_instrumental_variants': False,
             },
             'manifest `artists[]` must be a string',
         ),
@@ -543,6 +638,7 @@ def test_manifest_rejects_invalid_preset_shape() -> None:
                 'order': 1,
                 'preset': None,
                 'has_instrumental': False,
+                'has_instrumental_variants': False,
             },
             'manifest `artists[]` must be a non-empty string',
         ),
@@ -555,6 +651,7 @@ def test_manifest_rejects_invalid_preset_shape() -> None:
                 'order': 1,
                 'preset': None,
                 'has_instrumental': False,
+                'has_instrumental_variants': False,
             },
             'manifest `title` must be a non-empty string',
         ),
@@ -703,6 +800,7 @@ async def test_list_sub_seasons_returns_unique_sorted_values_with_none_first() -
                             order=1,
                             preset=None,
                             has_instrumental=False,
+                            has_instrumental_variants=False,
                         ),
                         ManifestEntry(
                             id=_UUID_2,
@@ -712,6 +810,7 @@ async def test_list_sub_seasons_returns_unique_sorted_values_with_none_first() -
                             order=1,
                             preset=None,
                             has_instrumental=True,
+                            has_instrumental_variants=False,
                         ),
                         ManifestEntry(
                             id=_UUID_3,
@@ -721,6 +820,7 @@ async def test_list_sub_seasons_returns_unique_sorted_values_with_none_first() -
                             order=2,
                             preset=None,
                             has_instrumental=False,
+                            has_instrumental_variants=False,
                         ),
                     ]
                 ),
@@ -791,6 +891,7 @@ async def test_store_creates_new_group_and_manifest_entry(monkeypatch: pytest.Mo
             'order': 1,
             'preset': None,
             'has_instrumental': False,
+            'has_instrumental_variants': False,
         }
     ]
     assert store._manifest_cache[cache_key].to_list() == [
@@ -802,6 +903,7 @@ async def test_store_creates_new_group_and_manifest_entry(monkeypatch: pytest.Mo
             'order': 1,
             'preset': None,
             'has_instrumental': False,
+            'has_instrumental_variants': False,
         }
     ]
 
@@ -824,6 +926,7 @@ async def test_store_uses_dense_order_within_sub_season_only(monkeypatch: pytest
                             order=1,
                             preset=None,
                             has_instrumental=False,
+                            has_instrumental_variants=False,
                         ),
                         ManifestEntry(
                             id=_UUID_3,
@@ -833,6 +936,7 @@ async def test_store_uses_dense_order_within_sub_season_only(monkeypatch: pytest
                             order=1,
                             preset=None,
                             has_instrumental=False,
+                            has_instrumental_variants=False,
                         ),
                     ]
                 ),
@@ -855,6 +959,7 @@ async def test_store_uses_dense_order_within_sub_season_only(monkeypatch: pytest
             'order': 1,
             'preset': None,
             'has_instrumental': False,
+            'has_instrumental_variants': False,
         },
         {
             'id': _UUID_3,
@@ -864,6 +969,7 @@ async def test_store_uses_dense_order_within_sub_season_only(monkeypatch: pytest
             'order': 1,
             'preset': None,
             'has_instrumental': False,
+            'has_instrumental_variants': False,
         },
         {
             'id': _UUID_2,
@@ -873,6 +979,7 @@ async def test_store_uses_dense_order_within_sub_season_only(monkeypatch: pytest
             'order': 2,
             'preset': None,
             'has_instrumental': False,
+            'has_instrumental_variants': False,
         },
     ]
 
@@ -934,6 +1041,245 @@ async def test_store_raises_rollback_error_with_original_note_if_cleanup_fails(
 
 
 @pytest.mark.asyncio
+async def test_store_instrumental_uploads_and_rewrites_manifest_for_existing_track() -> None:
+    group = TrackGroup(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
+    manifest_key = _manifest_key(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
+    instrumental_key = _instrumental_key(
+        universe=TrackUniverse.WEST,
+        year=2026,
+        season=Season.S1,
+        track_id=_UUID_1,
+    )
+    s3_client = _FakeS3Client(
+        objects={
+            _presets_key(): _presets_bytes(),
+            manifest_key: _manifest_bytes(
+                [
+                    ManifestEntry(
+                        id=_UUID_1,
+                        artists=('artist one',),
+                        title='title one',
+                        sub_season=SubSeason.A,
+                        order=1,
+                        preset=track_store_module.AppliedPreset(id=2, version=5),
+                        has_instrumental=False,
+                        has_instrumental_variants=False,
+                    ),
+                    ManifestEntry(
+                        id=_UUID_2,
+                        artists=('artist two',),
+                        title='title two',
+                        sub_season=SubSeason.B,
+                        order=1,
+                        preset=None,
+                        has_instrumental=True,
+                        has_instrumental_variants=False,
+                    ),
+                ]
+            ),
+        }
+    )
+    store = _store(s3_client)
+
+    await store.store_instrumental(
+        b'new-instrumental',
+        group=group,
+        track_id=_UUID_1,
+    )
+
+    assert s3_client.objects[instrumental_key] == b'new-instrumental'
+    assert json.loads(s3_client.objects[manifest_key].decode('utf-8')) == [
+        {
+            'id': _UUID_1,
+            'artists': ['artist one'],
+            'title': 'title one',
+            'sub_season': 'A',
+            'order': 1,
+            'preset': {'id': 2, 'version': 5},
+            'has_instrumental': True,
+            'has_instrumental_variants': False,
+        },
+        {
+            'id': _UUID_2,
+            'artists': ['artist two'],
+            'title': 'title two',
+            'sub_season': 'B',
+            'order': 1,
+            'preset': None,
+            'has_instrumental': True,
+            'has_instrumental_variants': False,
+        },
+    ]
+    assert store._manifest_cache[
+        _track_group_prefix(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
+    ].to_list() == [
+        {
+            'id': _UUID_1,
+            'artists': ['artist one'],
+            'title': 'title one',
+            'sub_season': 'A',
+            'order': 1,
+            'preset': {'id': 2, 'version': 5},
+            'has_instrumental': True,
+            'has_instrumental_variants': False,
+        },
+        {
+            'id': _UUID_2,
+            'artists': ['artist two'],
+            'title': 'title two',
+            'sub_season': 'B',
+            'order': 1,
+            'preset': None,
+            'has_instrumental': True,
+            'has_instrumental_variants': False,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_store_instrumental_raises_for_unknown_track_id_in_group() -> None:
+    group = TrackGroup(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
+    manifest_key = _manifest_key(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
+    store = _store(
+        _FakeS3Client(
+            objects={
+                _presets_key(): _presets_bytes(),
+                manifest_key: _manifest_bytes(
+                    [
+                        ManifestEntry(
+                            id=_UUID_1,
+                            artists=('artist',),
+                            title='title',
+                            sub_season=SubSeason.A,
+                            order=1,
+                            preset=None,
+                            has_instrumental=False,
+                            has_instrumental_variants=False,
+                        ),
+                    ]
+                ),
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match=f'Track id {_UUID_2} does not exist in group'):
+        await store.store_instrumental(
+            b'instrumental',
+            group=group,
+            track_id=_UUID_2,
+        )
+
+
+@pytest.mark.asyncio
+async def test_store_instrumental_overwrites_existing_key_without_probing_storage() -> None:
+    group = TrackGroup(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
+    manifest_key = _manifest_key(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
+    instrumental_key = _instrumental_key(
+        universe=TrackUniverse.WEST,
+        year=2026,
+        season=Season.S1,
+        track_id=_UUID_1,
+    )
+    s3_client = _FakeS3Client(
+        objects={
+            _presets_key(): _presets_bytes(),
+            manifest_key: _manifest_bytes(
+                [
+                    ManifestEntry(
+                        id=_UUID_1,
+                        artists=('artist',),
+                        title='title',
+                        sub_season=SubSeason.A,
+                        order=1,
+                        preset=None,
+                        has_instrumental=True,
+                        has_instrumental_variants=False,
+                    ),
+                ]
+            ),
+            instrumental_key: b'old-instrumental',
+        }
+    )
+    store = _store(s3_client)
+
+    await store.store_instrumental(
+        b'new-instrumental',
+        group=group,
+        track_id=_UUID_1,
+    )
+
+    assert s3_client.objects[instrumental_key] == b'new-instrumental'
+    assert instrumental_key not in s3_client.get_calls
+    assert s3_client.list_subprefixes_calls == []
+
+
+@pytest.mark.asyncio
+async def test_store_instrumental_raises_sync_error_and_keeps_uploaded_object_when_manifest_write_fails() -> None:
+    group = TrackGroup(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
+    manifest_key = _manifest_key(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
+    instrumental_key = _instrumental_key(
+        universe=TrackUniverse.WEST,
+        year=2026,
+        season=Season.S1,
+        track_id=_UUID_1,
+    )
+    original_manifest_payload = _manifest_bytes(
+        [
+            ManifestEntry(
+                id=_UUID_1,
+                artists=('artist',),
+                title='title',
+                sub_season=SubSeason.A,
+                order=1,
+                preset=track_store_module.AppliedPreset(id=2, version=5),
+                has_instrumental=False,
+                has_instrumental_variants=False,
+            ),
+        ]
+    )
+    s3_client = _FakeS3Client(
+        objects={
+            _presets_key(): _presets_bytes(),
+            manifest_key: original_manifest_payload,
+        },
+        put_failures={manifest_key},
+    )
+    store = _store(s3_client)
+
+    with pytest.raises(
+        TrackInstrumentalManifestSyncError, match='Instrumental/manifest synchronization failed'
+    ) as excinfo:
+        await store.store_instrumental(
+            b'new-instrumental',
+            group=group,
+            track_id=_UUID_1,
+        )
+
+    assert excinfo.value.track_id == _UUID_1
+    assert excinfo.value.instrumental_key == instrumental_key
+    assert excinfo.value.manifest_key == manifest_key
+    assert getattr(excinfo.value, '__notes__', []) == [
+        f"Original manifest write error: RuntimeError('boom putting {manifest_key}')"
+    ]
+    assert s3_client.objects[instrumental_key] == b'new-instrumental'
+    assert s3_client.objects[manifest_key] == original_manifest_payload
+    assert store._manifest_cache[
+        _track_group_prefix(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
+    ].to_list() == [
+        {
+            'id': _UUID_1,
+            'artists': ['artist'],
+            'title': 'title',
+            'sub_season': 'A',
+            'order': 1,
+            'preset': {'id': 2, 'version': 5},
+            'has_instrumental': False,
+            'has_instrumental_variants': False,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_fetch_with_known_preset_id_reaches_deferred_not_implemented() -> None:
     manifest_key = _manifest_key(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
     store = _store(
@@ -950,6 +1296,7 @@ async def test_fetch_with_known_preset_id_reaches_deferred_not_implemented() -> 
                             order=1,
                             preset=None,
                             has_instrumental=False,
+                            has_instrumental_variants=False,
                         ),
                     ]
                 ),
@@ -1002,6 +1349,7 @@ async def test_fetch_with_none_resolves_current_default_preset(monkeypatch: pyte
                             order=1,
                             preset=None,
                             has_instrumental=False,
+                            has_instrumental_variants=False,
                         ),
                     ]
                 ),

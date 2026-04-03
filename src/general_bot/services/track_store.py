@@ -322,10 +322,19 @@ class AppliedPreset:
 class ManifestEntry:
     """Single authoritative logical track row in a track-group manifest.
 
-    `preset is None` means no variants exist. Once variants exist, `preset`
-    stores the exact preset id and version used to produce them.
+    `preset is None` means no original variants are tracked. Once original
+    variants exist, `preset` stores the exact preset id and version used to
+    produce them.
 
-    `has_instrumental` tracks whether an original instrumental object exists.
+    `has_instrumental` tracks whether an authoritative original instrumental
+    object exists.
+
+    `has_instrumental_variants` is tracked separately because instrumental
+    storage can happen later than the original `store()` flow and can therefore
+    diverge from original variant completeness. Instrumental variants only make
+    sense when an instrumental exists and when original variants are tracked
+    through `preset`.
+
     Cover art is mandatory by convention and is therefore not represented by a
     separate manifest flag.
     """
@@ -337,6 +346,7 @@ class ManifestEntry:
     order: int
     preset: AppliedPreset | None
     has_instrumental: bool
+    has_instrumental_variants: bool
 
 
 class Manifest:
@@ -384,6 +394,7 @@ class Manifest:
                 'order': entry.order,
                 'preset': _applied_preset_to_dict(entry.preset),
                 'has_instrumental': entry.has_instrumental,
+                'has_instrumental_variants': entry.has_instrumental_variants,
             }
             for entry in self._entries
         ]
@@ -408,7 +419,16 @@ class Manifest:
         for raw_entry in data:
             if not isinstance(raw_entry, dict):
                 raise ValueError('manifest track entry must be an object')
-            if set(raw_entry) != {'id', 'artists', 'title', 'sub_season', 'order', 'preset', 'has_instrumental'}:
+            if set(raw_entry) != {
+                'id',
+                'artists',
+                'title',
+                'sub_season',
+                'order',
+                'preset',
+                'has_instrumental',
+                'has_instrumental_variants',
+            }:
                 raise ValueError('manifest track entry has unexpected fields')
 
             track_id = _parse_uuid7(
@@ -422,6 +442,16 @@ class Manifest:
             order = _expect_positive_int(raw_entry['order'], field='order', context='manifest')
             preset = _parse_applied_preset(raw_entry['preset'])
             has_instrumental = _expect_bool(raw_entry['has_instrumental'], field='has_instrumental', context='manifest')
+            has_instrumental_variants = _expect_bool(
+                raw_entry['has_instrumental_variants'],
+                field='has_instrumental_variants',
+                context='manifest',
+            )
+
+            if has_instrumental_variants and not has_instrumental:
+                raise ValueError('manifest `has_instrumental_variants` requires `has_instrumental`')
+            if has_instrumental_variants and preset is None:
+                raise ValueError('manifest `has_instrumental_variants` requires non-null `preset`')
 
             if track_id in seen_ids:
                 raise ValueError(f'duplicate manifest track id: {track_id}')
@@ -443,6 +473,7 @@ class Manifest:
                     order=order,
                     preset=preset,
                     has_instrumental=has_instrumental,
+                    has_instrumental_variants=has_instrumental_variants,
                 )
             )
 
@@ -492,6 +523,26 @@ class TrackStoreRollbackError(RuntimeError):
     def __init__(self, *, failed_keys: Iterable[Key]) -> None:
         self.failed_keys = tuple(failed_keys)
         super().__init__(f'Rollback failed for {len(self.failed_keys)} uploaded keys: {list(self.failed_keys)}')
+
+
+class TrackInstrumentalManifestSyncError(RuntimeError):
+    """Raised when instrumental uploads cannot be synchronized with manifest state."""
+
+    def __init__(
+        self,
+        *,
+        track_id: TrackId,
+        instrumental_key: Key,
+        manifest_key: Key,
+    ) -> None:
+        self.track_id = track_id
+        self.instrumental_key = instrumental_key
+        self.manifest_key = manifest_key
+        super().__init__(
+            'Instrumental/manifest synchronization failed '
+            f'for track id {self.track_id} after writing instrumental key {self.instrumental_key} '
+            f'but before persisting manifest key {self.manifest_key}'
+        )
 
 
 class TrackStore:
@@ -575,6 +626,7 @@ class TrackStore:
                 order=order,
                 preset=None,
                 has_instrumental=False,
+                has_instrumental_variants=False,
             )
         )
 
@@ -613,6 +665,85 @@ class TrackStore:
             raise
 
         self._manifest_cache[track_group_prefix] = manifest.copy()
+
+    async def store_instrumental(
+        self,
+        instrumental_bytes: bytes,
+        *,
+        group: TrackGroup,
+        track_id: TrackId,
+    ) -> None:
+        """Store or overwrite one track's authoritative instrumental object.
+
+        This method always writes the stable instrumental object key for the
+        provided `(group, track_id)` without probing storage first. The upload
+        happens before the manifest rewrite. If manifest persistence fails, the
+        uploaded instrumental is left in place and an explicit sync error is
+        raised for manual recovery.
+
+        Raises:
+            TrackPresetsCorruptedError: If `tracks/presets.json` exists but is malformed.
+            TrackManifestCorruptedError: If the target group's manifest exists but is malformed.
+            TrackGroupNotFoundError: If the target group's manifest does not exist.
+            ValueError: If `track_id` does not exist in the provided group's manifest.
+            TrackInstrumentalManifestSyncError: If the instrumental is written but the manifest rewrite fails.
+        """
+        await self._ensure_presets_loaded()
+
+        track_group_prefix = self._track_group_prefix(
+            universe=group.universe,
+            year=group.year,
+            season=group.season,
+        )
+        manifest = (await self._require_group_manifest(group, sub_season=None)).copy()
+
+        if not manifest.has_id(track_id):
+            raise ValueError(
+                f'Track id {track_id} does not exist in group {group.universe.value}-{group.year}-{int(group.season)}'
+            )
+
+        rewritten_manifest = Manifest(
+            [
+                ManifestEntry(
+                    id=entry.id,
+                    artists=entry.artists,
+                    title=entry.title,
+                    sub_season=entry.sub_season,
+                    order=entry.order,
+                    preset=entry.preset,
+                    has_instrumental=True if entry.id == track_id else entry.has_instrumental,
+                    has_instrumental_variants=False if entry.id == track_id else entry.has_instrumental_variants,
+                )
+                for entry in manifest
+            ]
+        )
+
+        instrumental_key = self._instrumental_key(track_group_prefix, track_id)
+        manifest_key = self._manifest_key(track_group_prefix)
+        manifest_payload = json.dumps(rewritten_manifest.to_list(), separators=(',', ':')).encode('utf-8')
+
+        await self._s3_client.put_bytes(
+            instrumental_key,
+            instrumental_bytes,
+            content_type=S3ContentType.OPUS,
+        )
+
+        try:
+            await self._s3_client.put_bytes(
+                manifest_key,
+                manifest_payload,
+                content_type=S3ContentType.JSON,
+            )
+        except Exception as error:
+            sync_error = TrackInstrumentalManifestSyncError(
+                track_id=track_id,
+                instrumental_key=instrumental_key,
+                manifest_key=manifest_key,
+            )
+            sync_error.add_note(f'Original manifest write error: {error!r}')
+            raise sync_error from error
+
+        self._manifest_cache[track_group_prefix] = rewritten_manifest.copy()
 
     async def fetch(
         self,
