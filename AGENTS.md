@@ -307,7 +307,9 @@ Format:
 - `type(scope): short description`
 
 Core rule:
-- describe the actual system change, not the tool, complaint, file operation, or mechanical diff
+- describe the PRIMARY system change introduced by the full diff
+- do not describe the last edited function, the most recent follow-up, the loudest error path, or a local implementation detail
+- describe the resulting capability or behavior at system level, not the mechanical patch that happened to be edited last
 
 Allowed types:
 - feat
@@ -319,11 +321,19 @@ Allowed types:
 - chore
 
 Type guidance:
-- `feat` = new capability or user-visible behavior
-- `fix` = corrected runtime behavior
+- `feat` = new capability or new managed behavior, even if the change also includes follow-up correctness work or failure handling for that new capability
+- `fix` = corrected existing runtime behavior without introducing a materially new capability
 - `refactor` = restructuring without intended behavior change
+- `perf` = performance improvement without changing intended behavior
 - `docs` = documentation-only changes
 - `chore` = tooling, formatting, dependencies, repo maintenance, runtime-version bumps
+
+Type selection rules:
+- if the diff introduces a new stored artifact, cache, lifecycle, workflow, API behavior, or managed derived state, use `feat`
+- do not use `fix` just because the diff contains error handling, rollback removal, validation tightening, or sync logic
+- if error handling or consistency logic exists mainly to support a new capability, the type is still `feat`
+- use `fix` only when the dominant purpose of the diff is correcting wrong behavior that already existed as the intended feature
+- when in doubt between `feat` and `fix`, choose based on the PRIMARY capability added by the full diff, not the most recent patch chunk
 
 Breaking changes:
 - use `type!:` or `type(scope)!:`
@@ -335,10 +345,37 @@ Subject rules:
 - imperative mood
 - ≤72 characters
 - system-level wording
-- avoid vague or low-signal subjects
+- name the dominant capability or behavior added/changed
 - implementation details belong in the body, not the subject
-- when updating `AGENTS.md`, name the affected agent rules or behavior explicitly
+- avoid vague or low-signal subjects
+- avoid describing only failure handling when the real change is a larger feature
+- avoid describing only metadata tracking when the real change is caching, storage, generation, reuse, or lifecycle management
+- prefer the user/system outcome over internal representation details
+- when updating `AGENTS.md`, make it explicit in the subject that the change is about agent behavior, agent rules, or agent instructions
+- prefer subjects that name who the rule applies to and what behavior changed
+- avoid ambiguous wording that could sound like general repository or developer policy when the change is specifically about agent behavior
 - avoid vague terms like `guidance`, `cleanup`, or `tweaks` when the change affects agent instructions or decision rules
+
+Commit subject prioritization:
+- first identify the PRIMARY capability or behavior introduced by the full diff
+- then choose the type based on that primary change
+- then write the subject from that primary change
+- do not anchor on:
+  - the last patch in the conversation
+  - the last bug fixed during review
+  - rollback/error-path work that only supports a broader feature
+  - internal representation wording when the externally meaningful change is clearer
+- - when the diff changes rules for a specific actor (for example agents), preserve that actor in the subject instead of generalizing to repository-wide wording
+
+Prefer outcome-oriented wording:
+- prefer `cache normalized clips`
+- prefer `reuse generated track variants`
+- prefer `preserve clip subgroup ordering`
+- prefer `tighten manifest validation`
+- avoid unnecessary representation-heavy wording like:
+  - `track normalized clip twins in manifests`
+  - `store applied cache metadata`
+  when the real system change is better expressed as caching, reuse, generation, cleanup, or lifecycle behavior
 
 User-facing concepts in subjects:
 - prefer neutral lowercase phrasing by default
@@ -346,10 +383,15 @@ User-facing concepts in subjects:
 - avoid backticks in subjects unless they add clear value
 
 Prefer:
+- `feat(services): cache normalized clips`
+- `feat(services): reuse generated track variants`
+- `fix(services): reject clip ids outside the requested subgroup`
 - `refactor(handlers): rename fetch flows to get and pull`
 - `docs: clarify agent commit scope rules`
 
 Over:
+- `feat(services): track normalized clip twins in manifests`
+- `fix(services): fail fast for normalized clip sync`
 - `refactor(handlers): rename \`Fetch\` flows to \`Get\` and \`Pull\``
 - `docs: clarify commit scope guidance`
 
@@ -374,11 +416,13 @@ Commit bodies:
   - broad refactors touching many files
   - multi-subsystem changes
   - changes where preserved semantics or guarantees matter
+  - commits where the subject names the main feature and the body needs to explain lifecycle, invariants, or failure semantics
 
 Bodies should:
 - use normal sentence case
 - explain why
 - summarize scope and key guarantees
+- clarify important secondary behavior that should not dominate the subject
 - avoid mechanically restating the diff
 
 Good body topics:
@@ -386,6 +430,13 @@ Good body topics:
 - preserved semantics
 - key invariants or guarantees
 - scope boundaries
+- lifecycle of new derived artifacts or caches
+- explicit note that secondary sync/error-handling work supports a larger feature
+
+Body prioritization:
+- subject = primary capability
+- body = important supporting mechanics, guarantees, and failure semantics
+- if the diff adds a feature plus supporting sync/error handling, put the sync/error handling in the body, not the subject
 
 Scopes:
 - use stable architectural subsystems
@@ -401,3 +452,10 @@ Commit coherence:
 - keep commits conceptually coherent by subsystem and intent
 - split unrelated changes
 - do not mix substantial runtime logic changes with unrelated tooling or formatting if that hurts clarity
+
+Pre-write check:
+- before finalizing a commit message, explicitly verify:
+  - what is the primary capability or behavior introduced by the full diff?
+  - is the chosen type driven by that primary change?
+  - is the subject naming the real outcome rather than a local implementation detail?
+  - are secondary fixes/error-path changes kept in the body instead of hijacking the subject?
