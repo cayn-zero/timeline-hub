@@ -20,9 +20,9 @@ from general_bot.services.track_store import (
     TrackGroupNotFoundError,
     TrackInstrumentalManifestSyncError,
     TrackManifestCorruptedError,
+    TrackManifestSyncError,
     TrackPresetsCorruptedError,
     TrackStore,
-    TrackStoreRollbackError,
     TrackUniverse,
 )
 
@@ -985,7 +985,7 @@ async def test_store_uses_dense_order_within_sub_season_only(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
-async def test_store_rolls_back_uploaded_objects_if_manifest_write_fails(
+async def test_store_raises_sync_error_and_keeps_uploaded_objects_when_manifest_write_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_uuid7(monkeypatch, _UUID_1)
@@ -998,46 +998,25 @@ async def test_store_rolls_back_uploaded_objects_if_manifest_write_fails(
     )
     store = _store(s3_client)
 
-    with pytest.raises(RuntimeError, match='boom putting'):
+    with pytest.raises(TrackManifestSyncError, match='Created object keys') as excinfo:
         await store.store(
             _track(),
             group=TrackGroup(universe=TrackUniverse.WEST, year=2026, season=Season.S1),
             sub_season=SubSeason.A,
         )
 
-    assert s3_client.deleted_keys == [cover_key, track_key]
-    assert track_key not in s3_client.objects
-    assert cover_key not in s3_client.objects
-    assert manifest_key not in s3_client.objects
-
-
-@pytest.mark.asyncio
-async def test_store_raises_rollback_error_with_original_note_if_cleanup_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _patch_uuid7(monkeypatch, _UUID_1)
-    manifest_key = _manifest_key(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
-    track_key = _track_key(universe=TrackUniverse.WEST, year=2026, season=Season.S1, track_id=_UUID_1)
-    cover_key = _cover_key(universe=TrackUniverse.WEST, year=2026, season=Season.S1, track_id=_UUID_1)
-    s3_client = _FakeS3Client(
-        objects={_presets_key(): _presets_bytes()},
-        put_failures={manifest_key},
-        delete_failures={cover_key},
-    )
-    store = _store(s3_client)
-
-    with pytest.raises(TrackStoreRollbackError) as excinfo:
-        await store.store(
-            _track(),
-            group=TrackGroup(universe=TrackUniverse.WEST, year=2026, season=Season.S1),
-            sub_season=SubSeason.A,
-        )
-
-    assert excinfo.value.failed_keys == (cover_key,)
+    assert excinfo.value.track_id == _UUID_1
+    assert excinfo.value.written_keys == (track_key, cover_key)
+    assert excinfo.value.manifest_key == manifest_key
     assert getattr(excinfo.value, '__notes__', []) == [
-        f"Original store error: RuntimeError('boom putting {manifest_key}')"
+        f"Original manifest write error: RuntimeError('boom putting {manifest_key}')"
     ]
-    assert s3_client.deleted_keys == [track_key]
+    assert s3_client.deleted_keys == []
+    assert s3_client.objects[track_key] == b'track'
+    assert s3_client.objects[cover_key] == b'cover'
+    assert manifest_key not in s3_client.objects
+    cache_key = _track_group_prefix(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
+    assert cache_key not in store._manifest_cache
 
 
 @pytest.mark.asyncio

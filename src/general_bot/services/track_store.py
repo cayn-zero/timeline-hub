@@ -517,12 +517,23 @@ class TrackGroupNotFoundError(LookupError):
         )
 
 
-class TrackStoreRollbackError(RuntimeError):
-    """Raised when store rollback cannot fully delete uploaded track objects."""
+class TrackManifestSyncError(RuntimeError):
+    """Raised when newly uploaded track objects cannot be synchronized with manifest state."""
 
-    def __init__(self, *, failed_keys: Iterable[Key]) -> None:
-        self.failed_keys = tuple(failed_keys)
-        super().__init__(f'Rollback failed for {len(self.failed_keys)} uploaded keys: {list(self.failed_keys)}')
+    def __init__(
+        self,
+        *,
+        track_id: TrackId,
+        written_keys: Iterable[Key],
+        manifest_key: Key,
+    ) -> None:
+        self.track_id = track_id
+        self.written_keys = tuple(written_keys)
+        self.manifest_key = manifest_key
+        super().__init__(
+            f'Created object keys {list(self.written_keys)} for track id {self.track_id} '
+            f'but manifest write failed for {self.manifest_key}'
+        )
 
 
 class TrackInstrumentalManifestSyncError(RuntimeError):
@@ -561,6 +572,12 @@ class TrackStore:
     Store-path reads use copy-safe manifests so writes can stage updates before
     commit, while read-path calls may reuse the cached manifest directly.
 
+    Store writes media objects before persisting the authoritative group
+    manifest. If manifest persistence fails after object upload succeeds, the
+    uploaded objects remain in storage and an explicit sync error is raised so
+    manual cleanup can remove the listed keys later. Manifest cache updates
+    happen only after manifest persistence succeeds.
+
     This phase is intentionally conservative:
         - `store()` writes only the original track and mandatory cover.
         - No hashing or deduplication is performed.
@@ -589,11 +606,10 @@ class TrackStore:
         contract and does not perform expensive media validation.
 
         Store creates the target group implicitly by writing its first manifest
-        if that group does not yet exist. The write is atomic at the method
-        level: track and cover objects are uploaded first, then the manifest is
-        written. If manifest persistence fails after uploads succeed, uploaded
-        objects from this call are deleted in reverse order before the error is
-        re-raised. If cleanup is incomplete, a rollback error is raised.
+        if that group does not yet exist. Track and cover objects are uploaded
+        first, then the authoritative manifest is persisted. If manifest
+        persistence fails after uploads succeed, those uploaded objects remain
+        in storage and an explicit sync error is raised for manual recovery.
 
         This phase does not perform hashing or deduplication. Every successful
         call stores a new original track object with a fresh UUIDv7 id.
@@ -602,10 +618,15 @@ class TrackStore:
         (single-writer). Concurrent writes are not supported and may lead to
         manifest overwrite or orphaned objects.
 
+        If a failure occurs during media uploads (e.g. while writing the cover),
+        previously written objects are not rolled back and may remain in storage
+        without a corresponding manifest entry. These objects are not referenced
+        by the system and can be safely removed manually if needed.
+
         Raises:
             TrackPresetsCorruptedError: If `tracks/presets.json` exists but is malformed.
             TrackManifestCorruptedError: If the target group's manifest exists but is malformed.
-            TrackStoreRollbackError: If manifest persistence fails and cleanup is incomplete.
+            TrackManifestSyncError: If track or cover objects are written but manifest persistence fails.
         """
         await self._ensure_presets_loaded()
 
@@ -633,38 +654,33 @@ class TrackStore:
         track_key = self._track_key(track_group_prefix, track_id)
         cover_key = self._cover_key(track_group_prefix, track_id)
         manifest_key = self._manifest_key(track_group_prefix)
-        manifest_payload = json.dumps(manifest.to_list(), separators=(',', ':')).encode('utf-8')
-        uploaded_keys: list[Key] = []
+        written_keys = [track_key, cover_key]
+
+        await self._s3_client.put_bytes(
+            track_key,
+            track.audio_bytes,
+            content_type=S3ContentType.OPUS,
+        )
+
+        await self._s3_client.put_bytes(
+            cover_key,
+            track.cover_bytes,
+            content_type=S3ContentType.JPEG,
+        )
 
         try:
-            await self._s3_client.put_bytes(
-                track_key,
-                track.audio_bytes,
-                content_type=S3ContentType.OPUS,
-            )
-            uploaded_keys.append(track_key)
-
-            await self._s3_client.put_bytes(
-                cover_key,
-                track.cover_bytes,
-                content_type=S3ContentType.JPEG,
-            )
-            uploaded_keys.append(cover_key)
-
-            await self._s3_client.put_bytes(
-                manifest_key,
-                manifest_payload,
-                content_type=S3ContentType.JSON,
+            await self._write_manifest_and_update_cache(
+                track_group_prefix=track_group_prefix,
+                manifest=manifest,
             )
         except Exception as error:
-            try:
-                await self._rollback_uploads(uploaded_keys)
-            except Exception as rollback_error:
-                rollback_error.add_note(f'Original store error: {error!r}')
-                raise rollback_error from error
-            raise
-
-        self._manifest_cache[track_group_prefix] = manifest.copy()
+            sync_error = TrackManifestSyncError(
+                track_id=track_id,
+                written_keys=written_keys,
+                manifest_key=manifest_key,
+            )
+            sync_error.add_note(f'Original manifest write error: {error!r}')
+            raise sync_error from error
 
     async def store_instrumental(
         self,
@@ -720,7 +736,6 @@ class TrackStore:
 
         instrumental_key = self._instrumental_key(track_group_prefix, track_id)
         manifest_key = self._manifest_key(track_group_prefix)
-        manifest_payload = json.dumps(rewritten_manifest.to_list(), separators=(',', ':')).encode('utf-8')
 
         await self._s3_client.put_bytes(
             instrumental_key,
@@ -729,10 +744,9 @@ class TrackStore:
         )
 
         try:
-            await self._s3_client.put_bytes(
-                manifest_key,
-                manifest_payload,
-                content_type=S3ContentType.JSON,
+            await self._write_manifest_and_update_cache(
+                track_group_prefix=track_group_prefix,
+                manifest=rewritten_manifest,
             )
         except Exception as error:
             sync_error = TrackInstrumentalManifestSyncError(
@@ -742,8 +756,6 @@ class TrackStore:
             )
             sync_error.add_note(f'Original manifest write error: {error!r}')
             raise sync_error from error
-
-        self._manifest_cache[track_group_prefix] = rewritten_manifest.copy()
 
     async def fetch(
         self,
@@ -889,17 +901,20 @@ class TrackStore:
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
             raise TrackManifestCorruptedError(manifest_key, str(error)) from error
 
-    async def _rollback_uploads(self, keys: list[Key]) -> None:
-        failed_keys: list[Key] = []
-
-        for key in reversed(keys):
-            try:
-                await self._s3_client.delete_key(key)
-            except Exception:
-                failed_keys.append(key)
-
-        if failed_keys:
-            raise TrackStoreRollbackError(failed_keys=failed_keys)
+    async def _write_manifest_and_update_cache(
+        self,
+        *,
+        track_group_prefix: Prefix,
+        manifest: Manifest,
+    ) -> None:
+        manifest_key = self._manifest_key(track_group_prefix)
+        manifest_payload = json.dumps(manifest.to_list(), separators=(',', ':')).encode('utf-8')
+        await self._s3_client.put_bytes(
+            manifest_key,
+            manifest_payload,
+            content_type=S3ContentType.JSON,
+        )
+        self._manifest_cache[track_group_prefix] = manifest.copy()
 
     def _presets_key(self) -> Key:
         return S3Client.join(_TRACKS_PREFIX, _PRESETS_FILENAME)
