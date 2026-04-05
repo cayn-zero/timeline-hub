@@ -7,13 +7,16 @@ import pytest
 import general_bot.services.track_store as track_store_module
 from general_bot.infra.s3 import S3Client, S3ObjectNotFoundError
 from general_bot.services.track_store import (
+    AppliedPreset,
+    FetchedVariant,
+    FetchedVariants,
     Manifest,
     ManifestEntry,
     Preset,
     PresetMode,
+    PresetRecord,
     Presets,
     Season,
-    StoredPreset,
     SubSeason,
     Track,
     TrackGroup,
@@ -49,6 +52,7 @@ class _FakeS3Client:
         self.get_calls: list[str] = []
         self.list_subprefixes_calls: list[str | None] = []
         self.deleted_keys: list[str] = []
+        self.delete_keys_calls: list[tuple[str, ...]] = []
 
     async def put_bytes(self, key: str, data: bytes, *, content_type: str | None = None) -> None:
         self.put_calls.append((key, data, content_type))
@@ -80,6 +84,13 @@ class _FakeS3Client:
             raise RuntimeError(f'boom deleting {key}')
         self.deleted_keys.append(key)
         self.objects.pop(key, None)
+
+    async def delete_keys(self, keys: list[str]) -> int:
+        key_list = list(keys)
+        self.delete_keys_calls.append(tuple(key_list))
+        for key in key_list:
+            await self.delete_key(key)
+        return len(key_list)
 
 
 def _track_group_prefix(*, universe: TrackUniverse, year: int, season: Season) -> str:
@@ -131,11 +142,29 @@ def _stored_preset(
     preset_id: int,
     version: int,
     preset: Preset,
-) -> StoredPreset:
-    return StoredPreset(
+) -> PresetRecord:
+    return PresetRecord(
         id=preset_id,
         version=version,
         preset=preset,
+    )
+
+
+def _applied_preset(
+    *,
+    preset_id: int = 1,
+    version: int = 3,
+    preset: Preset | None = None,
+    variant_count: int | None = None,
+) -> AppliedPreset:
+    resolved_preset = preset or _sample_stored_presets()[0].preset
+    resolved_variant_count = (
+        len(_store(_FakeS3Client())._resolve_variant_specs(resolved_preset)) if variant_count is None else variant_count
+    )
+    return AppliedPreset(
+        id=preset_id,
+        version=version,
+        variant_count=resolved_variant_count,
     )
 
 
@@ -149,7 +178,7 @@ def _bootstrap_preset() -> Preset:
     )
 
 
-def _sample_stored_presets() -> list[StoredPreset]:
+def _sample_stored_presets() -> list[PresetRecord]:
     return [
         _stored_preset(
             preset_id=1,
@@ -176,7 +205,7 @@ def _sample_stored_presets() -> list[StoredPreset]:
     ]
 
 
-def _presets_bytes(*, default_preset_id: int = 1, presets: list[StoredPreset] | None = None) -> bytes:
+def _presets_bytes(*, default_preset_id: int = 1, presets: list[PresetRecord] | None = None) -> bytes:
     return json.dumps(
         Presets(
             default_preset_id=default_preset_id,
@@ -184,6 +213,14 @@ def _presets_bytes(*, default_preset_id: int = 1, presets: list[StoredPreset] | 
         ).to_dict(),
         separators=(',', ':'),
     ).encode('utf-8')
+
+
+def _applied_preset_dict(applied_preset: AppliedPreset) -> dict[str, object]:
+    return {
+        'id': applied_preset.id,
+        'version': applied_preset.version,
+        'variant_count': applied_preset.variant_count,
+    }
 
 
 def _manifest_bytes(entries: list[ManifestEntry]) -> bytes:
@@ -255,6 +292,17 @@ def test_preset_rejects_negative_reverb_start() -> None:
         _preset(name='default', reverb_start=-0.01)
 
 
+def test_preset_rejects_missing_all_variant_modes() -> None:
+    with pytest.raises(ValueError, match='Preset must define at least one of slowed or sped_up'):
+        Preset(
+            name='default',
+            slowed=None,
+            sped_up=None,
+            reverb_start=0.01,
+            reverb_step=0.01,
+        )
+
+
 @pytest.mark.parametrize(
     ('kwargs', 'message'),
     [
@@ -292,10 +340,10 @@ def test_stored_preset_rejects_non_positive_identity_fields(
     message: str,
 ) -> None:
     with pytest.raises(ValueError, match=message):
-        StoredPreset(
+        PresetRecord(
             id=kwargs['id'],
             version=kwargs['version'],
-            preset=_preset(name='default'),
+            preset=_preset(name='default', slowed=PresetMode(step=0.05, levels=1)),
         )
 
 
@@ -308,7 +356,7 @@ def test_presets_reject_duplicate_stored_preset_ids() -> None:
                 'version': 1,
                 'preset': {
                     'name': 'default',
-                    'slowed': None,
+                    'slowed': {'step': 0.01, 'levels': 1},
                     'sped_up': None,
                     'reverb_start': 0.0,
                     'reverb_step': 0.0,
@@ -319,7 +367,7 @@ def test_presets_reject_duplicate_stored_preset_ids() -> None:
                 'version': 2,
                 'preset': {
                     'name': 'other',
-                    'slowed': None,
+                    'slowed': {'step': 0.02, 'levels': 1},
                     'sped_up': None,
                     'reverb_start': 0.1,
                     'reverb_step': 0.1,
@@ -341,7 +389,7 @@ def test_presets_reject_unknown_default_preset_id() -> None:
                 'version': 1,
                 'preset': {
                     'name': 'default',
-                    'slowed': None,
+                    'slowed': {'step': 0.01, 'levels': 1},
                     'sped_up': None,
                     'reverb_start': 0.0,
                     'reverb_step': 0.0,
@@ -372,7 +420,7 @@ def test_presets_serialization_preserves_insertion_order() -> None:
                 version=1,
                 preset=_preset(
                     name='soft',
-                    slowed=None,
+                    slowed=PresetMode(step=0.05, levels=1),
                     sped_up=None,
                     reverb_start=0.02,
                     reverb_step=0.01,
@@ -444,7 +492,11 @@ def test_manifest_round_trips_has_instrumental_variants() -> None:
         title='title',
         sub_season=SubSeason.A,
         order=1,
-        preset=track_store_module.AppliedPreset(id=2, version=5),
+        preset=_applied_preset(
+            preset_id=2,
+            version=5,
+            preset=_preset(name='snap', slowed=PresetMode(step=0.05, levels=2), sped_up=None),
+        ),
         has_instrumental=True,
         has_instrumental_variants=True,
     )
@@ -458,7 +510,7 @@ def test_manifest_round_trips_has_instrumental_variants() -> None:
             'title': 'title',
             'sub_season': 'A',
             'order': 1,
-            'preset': {'id': 2, 'version': 5},
+            'preset': {'id': 2, 'version': 5, 'variant_count': 2},
             'has_instrumental': True,
             'has_instrumental_variants': True,
         }
@@ -544,7 +596,7 @@ def test_manifest_rejects_invalid_preset_shape() -> None:
                     'title': 'title',
                     'sub_season': 'A',
                     'order': 1,
-                    'preset': {'preset_id': 2, 'version': 5},
+                    'preset': {'preset_id': 2, 'version': 5, 'preset': {}},
                     'has_instrumental': False,
                     'has_instrumental_variants': False,
                 }
@@ -562,7 +614,14 @@ def test_manifest_rejects_instrumental_variants_without_instrumental() -> None:
                     'title': 'title',
                     'sub_season': 'A',
                     'order': 1,
-                    'preset': {'id': 2, 'version': 5},
+                    'preset': _applied_preset_dict(
+                        _applied_preset(
+                            preset_id=2,
+                            version=5,
+                            preset=_preset(name='snap', slowed=PresetMode(step=0.05, levels=1)),
+                            variant_count=1,
+                        )
+                    ),
                     'has_instrumental': False,
                     'has_instrumental_variants': True,
                 }
@@ -663,31 +722,31 @@ def test_manifest_rejects_invalid_artists_or_title(entry: dict[str, object], mes
         Manifest.from_list([entry])
 
 
-def test_variant_key_uses_dash_separated_mode_stems() -> None:
+def test_variant_key_uses_ordered_variant_index() -> None:
     store = _store(_FakeS3Client())
     group_prefix = _track_group_prefix(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
 
-    assert store._variant_key(group_prefix, _UUID_1, mode='slowed', level=1) == S3Client.join(
+    assert store._variant_key(group_prefix, _UUID_1, index=1) == S3Client.join(
         group_prefix,
-        _UUID_1 + '-slowed-1.opus',
+        _UUID_1 + '-variant-1.opus',
     )
-    assert store._variant_key(group_prefix, _UUID_1, mode='sped_up', level=2) == S3Client.join(
+    assert store._variant_key(group_prefix, _UUID_1, index=2) == S3Client.join(
         group_prefix,
-        _UUID_1 + '-sped-up-2.opus',
+        _UUID_1 + '-variant-2.opus',
     )
 
 
-def test_instrumental_variant_key_uses_dash_separated_mode_stems() -> None:
+def test_instrumental_variant_key_uses_ordered_variant_index() -> None:
     store = _store(_FakeS3Client())
     group_prefix = _track_group_prefix(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
 
-    assert store._instrumental_variant_key(group_prefix, _UUID_1, mode='slowed', level=1) == S3Client.join(
+    assert store._instrumental_variant_key(group_prefix, _UUID_1, index=1) == S3Client.join(
         group_prefix,
-        _UUID_1 + '-instrumental-slowed-1.opus',
+        _UUID_1 + '-instrumental-variant-1.opus',
     )
-    assert store._instrumental_variant_key(group_prefix, _UUID_1, mode='sped_up', level=2) == S3Client.join(
+    assert store._instrumental_variant_key(group_prefix, _UUID_1, index=2) == S3Client.join(
         group_prefix,
-        _UUID_1 + '-instrumental-sped-up-2.opus',
+        _UUID_1 + '-instrumental-variant-2.opus',
     )
 
 
@@ -1035,7 +1094,7 @@ async def test_remove_preset_rejects_removing_last_remaining_preset() -> None:
 @pytest.mark.parametrize(
     ('method_name', 'args'),
     [
-        ('replace_preset', (99, _preset(name='replacement'))),
+        ('replace_preset', (99, _preset(name='replacement', slowed=PresetMode(step=0.05, levels=1)))),
         ('set_default_preset', (99,)),
         ('remove_preset', (99,)),
     ],
@@ -1200,7 +1259,7 @@ async def test_list_tracks_filters_requested_sub_season_and_sorts_by_manifest_or
                             title='second in manifest, first in order',
                             sub_season=SubSeason.A,
                             order=1,
-                            preset=track_store_module.AppliedPreset(id=1, version=3),
+                            preset=_applied_preset(preset_id=1, version=3),
                             has_instrumental=True,
                             has_instrumental_variants=True,
                         ),
@@ -1242,7 +1301,7 @@ async def test_list_tracks_returns_track_info_with_only_public_discovery_fields(
                             title='title',
                             sub_season=SubSeason.NONE,
                             order=7,
-                            preset=track_store_module.AppliedPreset(id=2, version=1),
+                            preset=_applied_preset(preset_id=2, version=1, preset=_sample_stored_presets()[1].preset),
                             has_instrumental=True,
                             has_instrumental_variants=False,
                         ),
@@ -1553,7 +1612,7 @@ async def test_store_instrumental_uploads_and_rewrites_manifest_for_existing_tra
                         title='title one',
                         sub_season=SubSeason.A,
                         order=1,
-                        preset=track_store_module.AppliedPreset(id=2, version=5),
+                        preset=_applied_preset(preset_id=2, version=5),
                         has_instrumental=False,
                         has_instrumental_variants=False,
                     ),
@@ -1587,7 +1646,7 @@ async def test_store_instrumental_uploads_and_rewrites_manifest_for_existing_tra
             'title': 'title one',
             'sub_season': 'A',
             'order': 1,
-            'preset': {'id': 2, 'version': 5},
+            'preset': _applied_preset_dict(_applied_preset(preset_id=2, version=5)),
             'has_instrumental': True,
             'has_instrumental_variants': False,
         },
@@ -1611,7 +1670,7 @@ async def test_store_instrumental_uploads_and_rewrites_manifest_for_existing_tra
             'title': 'title one',
             'sub_season': 'A',
             'order': 1,
-            'preset': {'id': 2, 'version': 5},
+            'preset': _applied_preset_dict(_applied_preset(preset_id=2, version=5)),
             'has_instrumental': True,
             'has_instrumental_variants': False,
         },
@@ -1723,7 +1782,7 @@ async def test_store_instrumental_raises_sync_error_and_keeps_uploaded_object_wh
                 title='title',
                 sub_season=SubSeason.A,
                 order=1,
-                preset=track_store_module.AppliedPreset(id=2, version=5),
+                preset=_applied_preset(preset_id=2, version=5),
                 has_instrumental=False,
                 has_instrumental_variants=False,
             ),
@@ -1764,44 +1823,136 @@ async def test_store_instrumental_raises_sync_error_and_keeps_uploaded_object_wh
             'title': 'title',
             'sub_season': 'A',
             'order': 1,
-            'preset': {'id': 2, 'version': 5},
+            'preset': _applied_preset_dict(_applied_preset(preset_id=2, version=5)),
             'has_instrumental': False,
             'has_instrumental_variants': False,
         }
     ]
 
 
+def _track_group(
+    *, universe: TrackUniverse = TrackUniverse.WEST, year: int = 2026, season: Season = Season.S1
+) -> TrackGroup:
+    return TrackGroup(universe=universe, year=year, season=season)
+
+
+def _variant_storage_objects(
+    store: TrackStore,
+    *,
+    group: TrackGroup,
+    track_id: str,
+    preset: Preset,
+    payload_prefix: str,
+    instrumental: bool = False,
+) -> dict[str, bytes]:
+    group_prefix = _track_group_prefix(universe=group.universe, year=group.year, season=group.season)
+    return {
+        store._variant_storage_key(
+            track_group_prefix=group_prefix,
+            track_id=track_id,
+            index=index,
+            instrumental=instrumental,
+        ): f'{payload_prefix}|{index}'.encode()
+        for index, spec in enumerate(store._resolve_variant_specs(preset), start=1)
+    }
+
+
+def _patch_create_audio_variant(monkeypatch: pytest.MonkeyPatch) -> list[tuple[bytes, float, float]]:
+    calls: list[tuple[bytes, float, float]] = []
+
+    async def _fake_create_audio_variant(audio_bytes: bytes, *, speed: float, reverb: float, **_: object) -> bytes:
+        calls.append((audio_bytes, speed, reverb))
+        return f'{audio_bytes.decode()}|{speed:.2f}|{reverb:.2f}'.encode()
+
+    monkeypatch.setattr(track_store_module, 'create_audio_variant', _fake_create_audio_variant)
+    return calls
+
+
 @pytest.mark.asyncio
-async def test_fetch_with_known_preset_id_reaches_deferred_not_implemented() -> None:
-    manifest_key = _manifest_key(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
-    store = _store(
-        _FakeS3Client(
-            objects={
-                _presets_key(): _presets_bytes(default_preset_id=2),
-                manifest_key: _manifest_bytes(
-                    [
-                        ManifestEntry(
-                            id=_UUID_1,
-                            artists=('artist',),
-                            title='title',
-                            sub_season=SubSeason.A,
-                            order=1,
-                            preset=None,
-                            has_instrumental=False,
-                            has_instrumental_variants=False,
-                        ),
-                    ]
+async def test_fetch_with_explicit_preset_returns_current_original_and_instrumental_variants() -> None:
+    group = _track_group()
+    manifest_key = _manifest_key(universe=group.universe, year=group.year, season=group.season)
+    cover_key = _cover_key(universe=group.universe, year=group.year, season=group.season, track_id=_UUID_1)
+    presets = _sample_stored_presets()
+    resolved = presets[0]
+    applied_preset = _applied_preset(preset_id=resolved.id, version=resolved.version, preset=resolved.preset)
+    store = _store(_FakeS3Client())
+    objects = {
+        _presets_key(): _presets_bytes(default_preset_id=2, presets=presets),
+        manifest_key: _manifest_bytes(
+            [
+                ManifestEntry(
+                    id=_UUID_1,
+                    artists=('artist', 'featured'),
+                    title='title',
+                    sub_season=SubSeason.A,
+                    order=1,
+                    preset=applied_preset,
+                    has_instrumental=True,
+                    has_instrumental_variants=True,
                 ),
-            }
+            ]
+        ),
+        cover_key: b'cover-bytes',
+    }
+    objects.update(
+        _variant_storage_objects(
+            store,
+            group=group,
+            track_id=_UUID_1,
+            preset=resolved.preset,
+            payload_prefix='orig',
         )
     )
-
-    with pytest.raises(NotImplementedError, match='later iteration'):
-        await store.fetch(
-            TrackGroup(universe=TrackUniverse.WEST, year=2026, season=Season.S1),
-            SubSeason.A,
-            preset_id=2,
+    objects.update(
+        _variant_storage_objects(
+            store,
+            group=group,
+            track_id=_UUID_1,
+            preset=resolved.preset,
+            payload_prefix='inst',
+            instrumental=True,
         )
+    )
+    s3_client = _FakeS3Client(objects=objects)
+    store = _store(s3_client)
+
+    result = await store.fetch(group, _UUID_1, preset_id=1)
+
+    assert isinstance(result, FetchedVariants)
+    assert result.track_id == _UUID_1
+    assert result.artists == ('artist', 'featured')
+    assert result.title == 'title'
+    assert result.cover_bytes == b'cover-bytes'
+    assert result.cover_filename == store._s3_key_to_filename(cover_key)
+    assert result.cover_filename == 'tracks--west-2026-1--' + _UUID_1 + '-cover.jpg'
+    assert isinstance(result.variants[0], FetchedVariant)
+    assert [variant.speed for variant in result.variants] == sorted(variant.speed for variant in result.variants)
+    assert [variant.audio_bytes for variant in result.variants] == [
+        b'orig|1',
+        b'orig|2',
+        b'orig|3',
+        b'orig|4',
+        b'orig|5',
+    ]
+    assert result.instrumental_variants is not None
+    assert [variant.audio_bytes for variant in result.instrumental_variants] == [
+        b'inst|1',
+        b'inst|2',
+        b'inst|3',
+        b'inst|4',
+        b'inst|5',
+    ]
+    assert (
+        _track_key(universe=group.universe, year=group.year, season=group.season, track_id=_UUID_1)
+        not in s3_client.get_calls
+    )
+    assert (
+        _instrumental_key(universe=group.universe, year=group.year, season=group.season, track_id=_UUID_1)
+        not in s3_client.get_calls
+    )
+    assert s3_client.delete_keys_calls == []
+    assert all(call[0] != manifest_key for call in s3_client.put_calls)
 
 
 @pytest.mark.asyncio
@@ -1809,28 +1960,77 @@ async def test_fetch_with_unknown_preset_id_raises_value_error() -> None:
     store = _store(_FakeS3Client(objects={_presets_key(): _presets_bytes(default_preset_id=2)}))
 
     with pytest.raises(ValueError, match='Unknown preset id: 99'):
-        await store.fetch(
-            TrackGroup(universe=TrackUniverse.WEST, year=2026, season=Season.S1),
-            SubSeason.A,
-            preset_id=99,
-        )
+        await store.fetch(_track_group(), _UUID_1, preset_id=99)
 
 
 @pytest.mark.asyncio
-async def test_fetch_with_none_resolves_current_default_preset(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_fetch_with_none_resolves_current_default_preset_and_returns_no_instrumental(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     default_calls: list[int] = []
     original_default_preset = Presets.default_preset
+    generation_calls = _patch_create_audio_variant(monkeypatch)
 
-    def _tracking_default_preset(self: Presets) -> StoredPreset:
+    def _tracking_default_preset(self: Presets) -> PresetRecord:
         default_calls.append(self.default_preset_id)
         return original_default_preset(self)
 
-    manifest_key = _manifest_key(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
+    group = _track_group()
+    manifest_key = _manifest_key(universe=group.universe, year=group.year, season=group.season)
+    track_key = _track_key(universe=group.universe, year=group.year, season=group.season, track_id=_UUID_1)
+    cover_key = _cover_key(universe=group.universe, year=group.year, season=group.season, track_id=_UUID_1)
     monkeypatch.setattr(Presets, 'default_preset', _tracking_default_preset)
+    s3_client = _FakeS3Client(
+        objects={
+            _presets_key(): _presets_bytes(default_preset_id=2),
+            manifest_key: _manifest_bytes(
+                [
+                    ManifestEntry(
+                        id=_UUID_1,
+                        artists=('artist',),
+                        title='title',
+                        sub_season=SubSeason.A,
+                        order=1,
+                        preset=None,
+                        has_instrumental=False,
+                        has_instrumental_variants=False,
+                    ),
+                ]
+            ),
+            track_key: b'authoritative-track',
+            cover_key: b'cover',
+        }
+    )
+    store = _store(s3_client)
+
+    result = await store.fetch(group, _UUID_1)
+
+    assert default_calls == [2]
+    assert result.instrumental_variants is None
+    assert result.cover_filename == store._s3_key_to_filename(cover_key)
+    assert generation_calls == [
+        (b'authoritative-track', 0.9, 0.03),
+        (b'authoritative-track', 0.95, 0.02),
+    ]
+    assert isinstance(result, FetchedVariants)
+
+
+@pytest.mark.asyncio
+async def test_fetch_raises_group_not_found() -> None:
+    store = _store(_FakeS3Client(objects={_presets_key(): _presets_bytes()}))
+
+    with pytest.raises(TrackGroupNotFoundError):
+        await store.fetch(_track_group(), _UUID_1)
+
+
+@pytest.mark.asyncio
+async def test_fetch_raises_value_error_for_unknown_track_id() -> None:
+    group = _track_group()
+    manifest_key = _manifest_key(universe=group.universe, year=group.year, season=group.season)
     store = _store(
         _FakeS3Client(
             objects={
-                _presets_key(): _presets_bytes(default_preset_id=2),
+                _presets_key(): _presets_bytes(),
                 manifest_key: _manifest_bytes(
                     [
                         ManifestEntry(
@@ -1849,24 +2049,282 @@ async def test_fetch_with_none_resolves_current_default_preset(monkeypatch: pyte
         )
     )
 
-    with pytest.raises(NotImplementedError, match='later iteration'):
-        await store.fetch(
-            TrackGroup(universe=TrackUniverse.WEST, year=2026, season=Season.S1),
-            SubSeason.A,
-        )
-
-    assert default_calls == [2]
+    with pytest.raises(ValueError, match=f'Track id {_UUID_2} does not exist in group'):
+        await store.fetch(group, _UUID_2)
 
 
 @pytest.mark.asyncio
-async def test_fetch_raises_group_not_found_before_not_implemented() -> None:
-    store = _store(_FakeS3Client(objects={_presets_key(): _presets_bytes()}))
-
-    with pytest.raises(TrackGroupNotFoundError):
-        await store.fetch(
-            TrackGroup(universe=TrackUniverse.WEST, year=2026, season=Season.S1),
-            SubSeason.A,
+async def test_fetch_regenerates_original_variants_when_preset_id_mismatches(monkeypatch: pytest.MonkeyPatch) -> None:
+    generation_calls = _patch_create_audio_variant(monkeypatch)
+    group = _track_group()
+    manifest_key = _manifest_key(universe=group.universe, year=group.year, season=group.season)
+    track_key = _track_key(universe=group.universe, year=group.year, season=group.season, track_id=_UUID_1)
+    cover_key = _cover_key(universe=group.universe, year=group.year, season=group.season, track_id=_UUID_1)
+    previous_applied_preset = _applied_preset(preset_id=2, version=1, preset=_sample_stored_presets()[1].preset)
+    s3_client = _FakeS3Client(
+        objects={
+            _presets_key(): _presets_bytes(default_preset_id=1),
+            manifest_key: _manifest_bytes(
+                [
+                    ManifestEntry(
+                        id=_UUID_1,
+                        artists=('artist',),
+                        title='title',
+                        sub_season=SubSeason.A,
+                        order=1,
+                        preset=previous_applied_preset,
+                        has_instrumental=False,
+                        has_instrumental_variants=False,
+                    ),
+                ]
+            ),
+            track_key: b'authoritative-track',
+            cover_key: b'cover',
+        }
+    )
+    s3_client.objects.update(
+        _variant_storage_objects(
+            _store(_FakeS3Client()),
+            group=group,
+            track_id=_UUID_1,
+            preset=_sample_stored_presets()[1].preset,
+            payload_prefix='old',
         )
+    )
+    store = _store(s3_client)
+
+    result = await store.fetch(group, _UUID_1, preset_id=1)
+
+    previous_keys = tuple(
+        _variant_storage_objects(
+            store,
+            group=group,
+            track_id=_UUID_1,
+            preset=_sample_stored_presets()[1].preset,
+            payload_prefix='old',
+        ).keys()
+    )
+    assert s3_client.delete_keys_calls == [previous_keys]
+    assert generation_calls
+    assert [variant.audio_bytes for variant in result.variants] == [
+        b'authoritative-track|0.82|0.03',
+        b'authoritative-track|0.88|0.02',
+        b'authoritative-track|0.94|0.01',
+        b'authoritative-track|1.06|0.01',
+        b'authoritative-track|1.12|0.02',
+    ]
+    rewritten_manifest = json.loads(s3_client.objects[manifest_key].decode('utf-8'))
+    assert rewritten_manifest[0]['preset'] == _applied_preset_dict(
+        _applied_preset(preset_id=1, version=3, preset=_sample_stored_presets()[0].preset)
+    )
+    assert rewritten_manifest[0]['has_instrumental_variants'] is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_regenerates_original_variants_when_preset_version_mismatches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation_calls = _patch_create_audio_variant(monkeypatch)
+    group = _track_group()
+    manifest_key = _manifest_key(universe=group.universe, year=group.year, season=group.season)
+    track_key = _track_key(universe=group.universe, year=group.year, season=group.season, track_id=_UUID_1)
+    cover_key = _cover_key(universe=group.universe, year=group.year, season=group.season, track_id=_UUID_1)
+    previous_applied_preset = _applied_preset(preset_id=1, version=2)
+    s3_client = _FakeS3Client(
+        objects={
+            _presets_key(): _presets_bytes(default_preset_id=1),
+            manifest_key: _manifest_bytes(
+                [
+                    ManifestEntry(
+                        id=_UUID_1,
+                        artists=('artist',),
+                        title='title',
+                        sub_season=SubSeason.A,
+                        order=1,
+                        preset=previous_applied_preset,
+                        has_instrumental=False,
+                        has_instrumental_variants=False,
+                    ),
+                ]
+            ),
+            track_key: b'authoritative-track',
+            cover_key: b'cover',
+        }
+    )
+    s3_client.objects.update(
+        _variant_storage_objects(
+            _store(_FakeS3Client()),
+            group=group,
+            track_id=_UUID_1,
+            preset=_sample_stored_presets()[0].preset,
+            payload_prefix='old',
+        )
+    )
+    store = _store(s3_client)
+
+    await store.fetch(group, _UUID_1, preset_id=1)
+
+    assert len(s3_client.delete_keys_calls) == 1
+    assert generation_calls
+
+
+@pytest.mark.asyncio
+async def test_fetch_treats_variant_count_mismatch_as_stale(monkeypatch: pytest.MonkeyPatch) -> None:
+    generation_calls = _patch_create_audio_variant(monkeypatch)
+    group = _track_group()
+    manifest_key = _manifest_key(universe=group.universe, year=group.year, season=group.season)
+    track_key = _track_key(universe=group.universe, year=group.year, season=group.season, track_id=_UUID_1)
+    cover_key = _cover_key(universe=group.universe, year=group.year, season=group.season, track_id=_UUID_1)
+    stale_applied_preset = AppliedPreset(id=1, version=3, variant_count=4)
+    s3_client = _FakeS3Client(
+        objects={
+            _presets_key(): _presets_bytes(default_preset_id=1),
+            manifest_key: _manifest_bytes(
+                [
+                    ManifestEntry(
+                        id=_UUID_1,
+                        artists=('artist',),
+                        title='title',
+                        sub_season=SubSeason.A,
+                        order=1,
+                        preset=stale_applied_preset,
+                        has_instrumental=False,
+                        has_instrumental_variants=False,
+                    ),
+                ]
+            ),
+            track_key: b'authoritative-track',
+            cover_key: b'cover',
+        }
+    )
+    store = _store(s3_client)
+
+    await store.fetch(group, _UUID_1, preset_id=1)
+
+    assert s3_client.delete_keys_calls == [
+        tuple(
+            store._variant_key(
+                _track_group_prefix(universe=group.universe, year=group.year, season=group.season),
+                _UUID_1,
+                index=index,
+            )
+            for index in range(1, 5)
+        )
+    ]
+    assert generation_calls
+
+
+@pytest.mark.asyncio
+async def test_fetch_regenerates_instrumental_variants_when_manifest_flag_is_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation_calls = _patch_create_audio_variant(monkeypatch)
+    group = _track_group()
+    manifest_key = _manifest_key(universe=group.universe, year=group.year, season=group.season)
+    cover_key = _cover_key(universe=group.universe, year=group.year, season=group.season, track_id=_UUID_1)
+    instrumental_key = _instrumental_key(
+        universe=group.universe, year=group.year, season=group.season, track_id=_UUID_1
+    )
+    current_applied_preset = _applied_preset(preset_id=1, version=3, preset=_sample_stored_presets()[0].preset)
+    store = _store(_FakeS3Client())
+    old_instrumental_keys = tuple(
+        _variant_storage_objects(
+            store,
+            group=group,
+            track_id=_UUID_1,
+            preset=_sample_stored_presets()[0].preset,
+            payload_prefix='old-inst',
+            instrumental=True,
+        ).keys()
+    )
+    s3_client = _FakeS3Client(
+        objects={
+            _presets_key(): _presets_bytes(default_preset_id=1),
+            manifest_key: _manifest_bytes(
+                [
+                    ManifestEntry(
+                        id=_UUID_1,
+                        artists=('artist',),
+                        title='title',
+                        sub_season=SubSeason.A,
+                        order=1,
+                        preset=current_applied_preset,
+                        has_instrumental=True,
+                        has_instrumental_variants=False,
+                    ),
+                ]
+            ),
+            cover_key: b'cover',
+            instrumental_key: b'authoritative-instrumental',
+        }
+    )
+    s3_client.objects.update(
+        _variant_storage_objects(
+            store,
+            group=group,
+            track_id=_UUID_1,
+            preset=_sample_stored_presets()[0].preset,
+            payload_prefix='orig',
+        )
+    )
+    s3_client.objects.update(
+        _variant_storage_objects(
+            store,
+            group=group,
+            track_id=_UUID_1,
+            preset=_sample_stored_presets()[0].preset,
+            payload_prefix='old-inst',
+            instrumental=True,
+        )
+    )
+    store = _store(s3_client)
+
+    result = await store.fetch(group, _UUID_1, preset_id=1)
+
+    assert old_instrumental_keys in s3_client.delete_keys_calls
+    assert instrumental_key in s3_client.get_calls
+    assert result.instrumental_variants is not None
+    assert all(call[0] == b'authoritative-instrumental' for call in generation_calls)
+    rewritten_manifest = json.loads(s3_client.objects[manifest_key].decode('utf-8'))
+    assert rewritten_manifest[0]['has_instrumental_variants'] is True
+
+
+@pytest.mark.asyncio
+async def test_fetch_regeneration_rewrites_manifest_with_applied_preset(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_create_audio_variant(monkeypatch)
+    group = _track_group()
+    manifest_key = _manifest_key(universe=group.universe, year=group.year, season=group.season)
+    track_key = _track_key(universe=group.universe, year=group.year, season=group.season, track_id=_UUID_1)
+    cover_key = _cover_key(universe=group.universe, year=group.year, season=group.season, track_id=_UUID_1)
+    s3_client = _FakeS3Client(
+        objects={
+            _presets_key(): _presets_bytes(default_preset_id=1),
+            manifest_key: _manifest_bytes(
+                [
+                    ManifestEntry(
+                        id=_UUID_1,
+                        artists=('artist',),
+                        title='title',
+                        sub_season=SubSeason.A,
+                        order=1,
+                        preset=None,
+                        has_instrumental=False,
+                        has_instrumental_variants=False,
+                    ),
+                ]
+            ),
+            track_key: b'authoritative-track',
+            cover_key: b'cover',
+        }
+    )
+    store = _store(s3_client)
+
+    await store.fetch(group, _UUID_1, preset_id=1)
+
+    cached_applied_preset = next(
+        iter(store._manifest_cache[_track_group_prefix(universe=group.universe, year=group.year, season=group.season)])
+    ).preset
+    assert cached_applied_preset == _applied_preset(preset_id=1, version=3, preset=_sample_stored_presets()[0].preset)
 
 
 @pytest.mark.asyncio

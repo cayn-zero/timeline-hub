@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import IntEnum, StrEnum
 from typing import Self, TypeVar
 
+from general_bot.infra.ffmpeg import create_audio_variant
 from general_bot.infra.s3 import Key, Prefix, S3Client, S3ContentType, S3ObjectNotFoundError
 
 _TRACKS_PREFIX = 'tracks'
@@ -15,14 +16,12 @@ _TRACK_SUFFIX = '.opus'
 _COVER_SUFFIX = '-cover.jpg'
 _INSTRUMENTAL_SUFFIX = '-instrumental.opus'
 _VARIANT_MODE_SEPARATOR = '-'
-_VARIANT_MODE_TO_STEM = {
-    'slowed': 'slowed',
-    'sped_up': 'sped-up',
-}
 _TRACK_GROUP_SEPARATOR = '-'
+_FILENAME_S3_DELIMITER_ESCAPE = '--'
 
 type TrackId = str
 type PresetId = int
+type Filename = str
 
 
 class Season(IntEnum):
@@ -127,6 +126,28 @@ class TrackInfo:
     title: str
 
 
+@dataclass(frozen=True, slots=True)
+class FetchedVariant:
+    """One generated playable track variant returned by `fetch()`."""
+
+    speed: float
+    reverb: float
+    audio_bytes: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class FetchedVariants:
+    """Immutable UI read model for one track's generated variants and shared metadata."""
+
+    track_id: TrackId
+    artists: tuple[str, ...]
+    title: str
+    cover_filename: Filename
+    cover_bytes: bytes
+    variants: tuple[FetchedVariant, ...]
+    instrumental_variants: tuple[FetchedVariant, ...] | None
+
+
 class SubSeason(StrEnum):
     """Track sub-season identifier."""
 
@@ -194,10 +215,13 @@ class Preset:
         if float(self.reverb_step) < 0.0:
             raise ValueError('Preset.reverb_step must be >= 0')
 
+        if self.slowed is None and self.sped_up is None:
+            raise ValueError('Preset must define at least one of slowed or sped_up')
+
 
 @dataclass(frozen=True, slots=True)
-class StoredPreset:
-    """Internal persisted preset record with identity and version metadata."""
+class PresetRecord:
+    """Persisted preset record with identity and version metadata."""
 
     id: PresetId
     version: int
@@ -220,24 +244,56 @@ class StoredPreset:
 
 
 @dataclass(frozen=True, slots=True)
+class AppliedPreset:
+    """Manifest-only materialization metadata for one generated variant family.
+
+    This records which preset identity and version produced the currently
+    materialized ordered variants for a track family. It does not store full
+    preset values. `variant_count` is the number of ordered variants currently
+    materialized for that family.
+    """
+
+    id: PresetId
+    version: int
+    variant_count: int
+
+    def __post_init__(self) -> None:
+        """Validate applied preset invariants for all construction paths."""
+        if isinstance(self.id, bool) or not isinstance(self.id, int):
+            raise ValueError('AppliedPreset.id must be an integer')
+        if self.id < 1:
+            raise ValueError('AppliedPreset.id must be >= 1')
+
+        if isinstance(self.version, bool) or not isinstance(self.version, int):
+            raise ValueError('AppliedPreset.version must be an integer')
+        if self.version < 1:
+            raise ValueError('AppliedPreset.version must be >= 1')
+
+        if isinstance(self.variant_count, bool) or not isinstance(self.variant_count, int):
+            raise ValueError('AppliedPreset.variant_count must be an integer')
+        if self.variant_count < 1:
+            raise ValueError('AppliedPreset.variant_count must be >= 1')
+
+
+@dataclass(frozen=True, slots=True)
 class Presets:
     """Authoritative preset registry stored at `tracks/presets.json`."""
 
     default_preset_id: PresetId
-    presets: list[StoredPreset]
+    presets: list[PresetRecord]
 
-    def get(self, preset_id: PresetId) -> StoredPreset | None:
+    def get(self, preset_id: PresetId) -> PresetRecord | None:
         """Return the stored preset with the given id, if present."""
         return next((preset for preset in self.presets if preset.id == preset_id), None)
 
-    def require(self, preset_id: PresetId) -> StoredPreset:
+    def require(self, preset_id: PresetId) -> PresetRecord:
         """Return the stored preset with the given id or raise `ValueError`."""
         preset = self.get(preset_id)
         if preset is None:
             raise ValueError(f'Unknown preset id: {preset_id}')
         return preset
 
-    def default_preset(self) -> StoredPreset:
+    def default_preset(self) -> PresetRecord:
         """Return the current default stored preset."""
         return self.require(self.default_preset_id)
 
@@ -282,7 +338,7 @@ class Presets:
         if not raw_presets:
             raise ValueError('presets `presets` must not be empty')
 
-        presets: list[StoredPreset] = []
+        presets: list[PresetRecord] = []
         seen_ids: set[int] = set()
         for raw_preset in raw_presets:
             if not isinstance(raw_preset, dict):
@@ -303,7 +359,7 @@ class Presets:
 
             seen_ids.add(preset_id)
             presets.append(
-                StoredPreset(
+                PresetRecord(
                     id=preset_id,
                     version=version,
                     preset=preset_value,
@@ -320,20 +376,14 @@ class Presets:
 
 
 @dataclass(frozen=True, slots=True)
-class AppliedPreset:
-    """Preset identity recorded in the manifest once variants exist."""
-
-    id: int
-    version: int
-
-
-@dataclass(frozen=True, slots=True)
 class ManifestEntry:
     """Single authoritative logical track row in a track-group manifest.
 
     `preset is None` means no original variants are tracked. Once original
-    variants exist, `preset` stores the exact preset id and version used to
-    produce them.
+    variants exist, `preset` stores `AppliedPreset` materialization metadata
+    describing which preset identity/version produced the current ordered
+    variant family and how many ordered variants exist. It is not a source of
+    truth for preset values.
 
     `has_instrumental` tracks whether an authoritative original instrumental
     object exists.
@@ -356,6 +406,12 @@ class ManifestEntry:
     preset: AppliedPreset | None
     has_instrumental: bool
     has_instrumental_variants: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedVariantSpec:
+    speed: float
+    reverb: float
 
 
 class Manifest:
@@ -449,7 +505,7 @@ class Manifest:
             title = _expect_non_empty_str(raw_entry['title'], field='title', context='manifest')
             sub_season = _parse_enum(raw_entry['sub_season'], SubSeason, field='sub_season', context='manifest')
             order = _expect_positive_int(raw_entry['order'], field='order', context='manifest')
-            preset = _parse_applied_preset(raw_entry['preset'])
+            preset = _parse_applied_preset(raw_entry['preset'], context='manifest')
             has_instrumental = _expect_bool(raw_entry['has_instrumental'], field='has_instrumental', context='manifest')
             has_instrumental_variants = _expect_bool(
                 raw_entry['has_instrumental_variants'],
@@ -594,7 +650,7 @@ class TrackStore:
         - `store()` writes only the original track and mandatory cover.
         - No hashing or deduplication is performed.
         - Concurrent writes to the same `TrackGroup` are unsupported.
-        - `fetch()` validates setup only and defers retrieval and variant work.
+        - `fetch()` returns generated variants only and may lazily regenerate stale caches.
     """
 
     def __init__(self, s3_client: S3Client, *, bootstrap_preset: Preset) -> None:
@@ -836,39 +892,157 @@ class TrackStore:
     async def fetch(
         self,
         group: TrackGroup,
-        sub_season: SubSeason,
+        track_id: TrackId,
         *,
         preset_id: PresetId | None = None,
-    ) -> object:
-        """Prepare for a future track fetch and variant application flow.
+    ) -> FetchedVariants:
+        """Fetch one track's generated variants, materializing stale caches lazily.
 
-        This method is intentionally partial in this iteration. It guarantees
-        preset bootstrap, validates the requested group exists, resolves the
-        authoritative preset to use, and then stops. Final retrieval, variant
-        generation, and return-shape design will be implemented later.
+        The selected track is identified by `(group, track_id)`. The returned
+        payload contains only generated variants plus shared UI metadata:
+        cover bytes and a deterministic flat cover filename. The authoritative
+        original track and optional authoritative instrumental objects are read
+        only when regeneration is required.
+
+        Staleness is determined only by the manifest's cached `AppliedPreset`
+        metadata, the resolved source-of-truth `StoredPreset`, and the
+        `has_instrumental_variants` flag. No S3 listing is used. Variants are
+        returned in strictly ascending speed order across all slowed and
+        sped-up modes, and that same ordering determines their stable indexed
+        storage keys.
+
+        Variant generation is intentionally not atomic. If uploads succeed but
+        manifest persistence fails, orphaned variant objects may remain in
+        storage for manual cleanup, matching the store path's existing staged
+        write semantics.
 
         Raises:
             TrackPresetsCorruptedError: If `tracks/presets.json` exists but is malformed.
             TrackGroupNotFoundError: If the requested group manifest does not exist.
             TrackManifestCorruptedError: If the requested group manifest exists but is malformed.
-            ValueError: If `preset_id` does not refer to a known preset.
-            NotImplementedError: Always, after setup validation succeeds.
+            ValueError: If `preset_id` is unknown or `track_id` is missing from the manifest.
         """
         presets = await self._ensure_presets_loaded()
-        resolved_preset = presets.default_preset() if preset_id is None else presets.require(preset_id)
+        resolved_stored_preset = presets.default_preset() if preset_id is None else presets.require(preset_id)
+        track_group_prefix = self._track_group_prefix(
+            universe=group.universe,
+            year=group.year,
+            season=group.season,
+        )
+        manifest = await self._require_group_manifest(group, sub_season=None)
+        entry = self._require_manifest_entry(manifest, group=group, track_id=track_id)
 
-        await self._require_group_manifest(group, sub_season=sub_season)
-        _ = resolved_preset
-        raise NotImplementedError(
-            'TrackStore.fetch() will retrieve tracks and apply or generate variants in a later iteration.'
+        cover_key = self._cover_key(track_group_prefix, track_id)
+        cover_bytes = await self._s3_client.get_bytes(cover_key)
+        cover_filename = self._s3_key_to_filename(cover_key)
+
+        variant_specs = self._resolve_variant_specs(resolved_stored_preset.preset)
+        variant_count = len(variant_specs)
+        original_is_current = self._is_applied_preset_current(
+            entry.preset,
+            resolved_preset=resolved_stored_preset,
+            variant_count=variant_count,
+        )
+        instrumental_is_current = (
+            entry.has_instrumental
+            and self._is_applied_preset_current(
+                entry.preset,
+                resolved_preset=resolved_stored_preset,
+                variant_count=variant_count,
+            )
+            and entry.has_instrumental_variants
         )
 
-    async def list_presets(self) -> list[StoredPreset]:
+        original_regenerated = False
+        if original_is_current:
+            variants = await self._load_variants(
+                track_group_prefix=track_group_prefix,
+                track_id=track_id,
+                variant_specs=variant_specs,
+                instrumental=False,
+            )
+        else:
+            if entry.preset is not None:
+                await self._delete_variants(
+                    track_group_prefix=track_group_prefix,
+                    track_id=track_id,
+                    variant_count=entry.preset.variant_count,
+                    instrumental=False,
+                )
+
+            source_track_bytes = await self._s3_client.get_bytes(self._track_key(track_group_prefix, track_id))
+            variants = await self._generate_and_store_variants(
+                source_bytes=source_track_bytes,
+                track_group_prefix=track_group_prefix,
+                track_id=track_id,
+                variant_specs=variant_specs,
+                instrumental=False,
+            )
+            original_regenerated = True
+
+        instrumental_variants: tuple[FetchedVariant, ...] | None
+        instrumental_regenerated = False
+        if not entry.has_instrumental:
+            instrumental_variants = None
+        elif instrumental_is_current:
+            instrumental_variants = await self._load_variants(
+                track_group_prefix=track_group_prefix,
+                track_id=track_id,
+                variant_specs=variant_specs,
+                instrumental=True,
+            )
+        else:
+            if entry.preset is not None:
+                await self._delete_variants(
+                    track_group_prefix=track_group_prefix,
+                    track_id=track_id,
+                    variant_count=entry.preset.variant_count,
+                    instrumental=True,
+                )
+
+            source_instrumental_bytes = await self._s3_client.get_bytes(
+                self._instrumental_key(track_group_prefix, track_id)
+            )
+            instrumental_variants = await self._generate_and_store_variants(
+                source_bytes=source_instrumental_bytes,
+                track_group_prefix=track_group_prefix,
+                track_id=track_id,
+                variant_specs=variant_specs,
+                instrumental=True,
+            )
+            instrumental_regenerated = True
+
+        if original_regenerated or instrumental_regenerated:
+            await self._write_manifest_and_update_cache(
+                track_group_prefix=track_group_prefix,
+                manifest=self._rewrite_manifest_entry(
+                    manifest,
+                    track_id=track_id,
+                    applied_preset=AppliedPreset(
+                        id=resolved_stored_preset.id,
+                        version=resolved_stored_preset.version,
+                        variant_count=variant_count,
+                    ),
+                    has_instrumental_variants=entry.has_instrumental,
+                ),
+            )
+
+        return FetchedVariants(
+            track_id=entry.id,
+            artists=entry.artists,
+            title=entry.title,
+            cover_filename=cover_filename,
+            cover_bytes=cover_bytes,
+            variants=variants,
+            instrumental_variants=instrumental_variants,
+        )
+
+    async def list_presets(self) -> list[PresetRecord]:
         """List authoritative stored preset records, including version metadata."""
         presets = await self._ensure_presets_loaded()
         return list(presets.presets)
 
-    async def get_default_preset(self) -> StoredPreset:
+    async def get_default_preset(self) -> PresetRecord:
         presets = await self._ensure_presets_loaded()
         return presets.default_preset()
 
@@ -884,7 +1058,7 @@ class TrackStore:
             default_preset_id=presets.default_preset_id,
             presets=[
                 *presets.presets,
-                StoredPreset(
+                PresetRecord(
                     id=next_preset_id,
                     version=1,
                     preset=preset,
@@ -905,7 +1079,7 @@ class TrackStore:
         updated_presets = Presets(
             default_preset_id=presets.default_preset_id,
             presets=[
-                StoredPreset(
+                PresetRecord(
                     id=stored_preset.id,
                     version=stored_preset.version + 1,
                     preset=preset,
@@ -987,7 +1161,7 @@ class TrackStore:
         return presets
 
     def _bootstrap_presets(self) -> Presets:
-        bootstrap_preset = StoredPreset(
+        bootstrap_preset = PresetRecord(
             id=1,
             version=1,
             preset=self._bootstrap_preset,
@@ -1119,18 +1293,16 @@ class TrackStore:
     def _instrumental_key(self, track_group_prefix: Prefix, track_id: TrackId) -> Key:
         return S3Client.join(track_group_prefix, track_id + _INSTRUMENTAL_SUFFIX)
 
-    def _variant_key(self, track_group_prefix: Prefix, track_id: TrackId, *, mode: str, level: int) -> Key:
-        mode_stem = _variant_mode_to_stem(mode)
-        validated_level = _expect_positive_int(level, field='level', context='variant key')
-        object_name = f'{track_id}{_VARIANT_MODE_SEPARATOR}{mode_stem}{_VARIANT_MODE_SEPARATOR}{validated_level}'
+    def _variant_key(self, track_group_prefix: Prefix, track_id: TrackId, *, index: int) -> Key:
+        validated_index = _expect_positive_int(index, field='index', context='variant key')
+        object_name = f'{track_id}{_VARIANT_MODE_SEPARATOR}variant{_VARIANT_MODE_SEPARATOR}{validated_index}'
         return S3Client.join(track_group_prefix, object_name + _TRACK_SUFFIX)
 
-    def _instrumental_variant_key(self, track_group_prefix: Prefix, track_id: TrackId, *, mode: str, level: int) -> Key:
-        mode_stem = _variant_mode_to_stem(mode)
-        validated_level = _expect_positive_int(level, field='level', context='instrumental variant key')
+    def _instrumental_variant_key(self, track_group_prefix: Prefix, track_id: TrackId, *, index: int) -> Key:
+        validated_index = _expect_positive_int(index, field='index', context='instrumental variant key')
         object_name = (
             f'{track_id}{_VARIANT_MODE_SEPARATOR}instrumental{_VARIANT_MODE_SEPARATOR}'
-            f'{mode_stem}{_VARIANT_MODE_SEPARATOR}{validated_level}'
+            f'variant{_VARIANT_MODE_SEPARATOR}{validated_index}'
         )
         return S3Client.join(track_group_prefix, object_name + _TRACK_SUFFIX)
 
@@ -1139,6 +1311,190 @@ class TrackStore:
             track_id = _uuid7().hex
             if not manifest.has_id(track_id):
                 return track_id
+
+    def _require_manifest_entry(self, manifest: Manifest, *, group: TrackGroup, track_id: TrackId) -> ManifestEntry:
+        for entry in manifest:
+            if entry.id == track_id:
+                return entry
+
+        raise ValueError(
+            f'Track id {track_id} does not exist in group {group.universe.value}-{group.year}-{int(group.season)}'
+        )
+
+    def _is_applied_preset_current(
+        self,
+        applied_preset: AppliedPreset | None,
+        *,
+        resolved_preset: PresetRecord,
+        variant_count: int,
+    ) -> bool:
+        return (
+            applied_preset is not None
+            and applied_preset.id == resolved_preset.id
+            and applied_preset.version == resolved_preset.version
+            and applied_preset.variant_count == variant_count
+        )
+
+    def _resolve_variant_specs(self, preset: Preset) -> tuple[_ResolvedVariantSpec, ...]:
+        # This final ascending-speed order is a storage invariant: variant
+        # index N maps to the Nth sorted spec in persistent S3 keys. Changing
+        # the ordering logic without explicit migration/invalidation can make
+        # existing indexed variant objects point to different semantics.
+        variant_specs: list[_ResolvedVariantSpec] = []
+        if preset.slowed is not None:
+            for level in range(1, preset.slowed.levels + 1):
+                variant_specs.append(
+                    _ResolvedVariantSpec(
+                        speed=1.0 - level * preset.slowed.step,
+                        reverb=preset.reverb_start + (level - 1) * preset.reverb_step,
+                    )
+                )
+        if preset.sped_up is not None:
+            for level in range(1, preset.sped_up.levels + 1):
+                variant_specs.append(
+                    _ResolvedVariantSpec(
+                        speed=1.0 + level * preset.sped_up.step,
+                        reverb=preset.reverb_start + (level - 1) * preset.reverb_step,
+                    )
+                )
+
+        return tuple(sorted(variant_specs, key=lambda spec: spec.speed))
+
+    async def _load_variants(
+        self,
+        *,
+        track_group_prefix: Prefix,
+        track_id: TrackId,
+        variant_specs: tuple[_ResolvedVariantSpec, ...],
+        instrumental: bool,
+    ) -> tuple[FetchedVariant, ...]:
+        variants: list[FetchedVariant] = []
+        for index, spec in enumerate(variant_specs, start=1):
+            variant_key = self._variant_storage_key(
+                track_group_prefix=track_group_prefix,
+                track_id=track_id,
+                index=index,
+                instrumental=instrumental,
+            )
+            variant_bytes = await self._s3_client.get_bytes(variant_key)
+            variants.append(
+                FetchedVariant(
+                    speed=spec.speed,
+                    reverb=spec.reverb,
+                    audio_bytes=variant_bytes,
+                )
+            )
+
+        return tuple(variants)
+
+    async def _generate_and_store_variants(
+        self,
+        *,
+        source_bytes: bytes,
+        track_group_prefix: Prefix,
+        track_id: TrackId,
+        variant_specs: tuple[_ResolvedVariantSpec, ...],
+        instrumental: bool,
+    ) -> tuple[FetchedVariant, ...]:
+        variants: list[FetchedVariant] = []
+        for index, spec in enumerate(variant_specs, start=1):
+            generated_bytes = await create_audio_variant(
+                source_bytes,
+                speed=spec.speed,
+                reverb=spec.reverb,
+            )
+            variant_key = self._variant_storage_key(
+                track_group_prefix=track_group_prefix,
+                track_id=track_id,
+                index=index,
+                instrumental=instrumental,
+            )
+            await self._s3_client.put_bytes(
+                variant_key,
+                generated_bytes,
+                content_type=S3ContentType.OPUS,
+            )
+            variants.append(
+                FetchedVariant(
+                    speed=spec.speed,
+                    reverb=spec.reverb,
+                    audio_bytes=generated_bytes,
+                )
+            )
+
+        return tuple(variants)
+
+    async def _delete_variants(
+        self,
+        *,
+        track_group_prefix: Prefix,
+        track_id: TrackId,
+        variant_count: int,
+        instrumental: bool,
+    ) -> None:
+        await self._s3_client.delete_keys(
+            [
+                self._variant_storage_key(
+                    track_group_prefix=track_group_prefix,
+                    track_id=track_id,
+                    index=index,
+                    instrumental=instrumental,
+                )
+                for index in range(1, variant_count + 1)
+            ]
+        )
+
+    def _variant_storage_key(
+        self,
+        *,
+        track_group_prefix: Prefix,
+        track_id: TrackId,
+        index: int,
+        instrumental: bool,
+    ) -> Key:
+        if instrumental:
+            return self._instrumental_variant_key(track_group_prefix, track_id, index=index)
+        return self._variant_key(track_group_prefix, track_id, index=index)
+
+    def _rewrite_manifest_entry(
+        self,
+        manifest: Manifest,
+        *,
+        track_id: TrackId,
+        applied_preset: AppliedPreset,
+        has_instrumental_variants: bool,
+    ) -> Manifest:
+        return Manifest(
+            [
+                ManifestEntry(
+                    id=entry.id,
+                    artists=entry.artists,
+                    title=entry.title,
+                    sub_season=entry.sub_season,
+                    order=entry.order,
+                    preset=applied_preset if entry.id == track_id else entry.preset,
+                    has_instrumental=entry.has_instrumental,
+                    has_instrumental_variants=(
+                        has_instrumental_variants if entry.id == track_id else entry.has_instrumental_variants
+                    ),
+                )
+                for entry in manifest
+            ]
+        )
+
+    @staticmethod
+    def _s3_key_to_filename(storage_key: Key) -> Filename:
+        """Return a flat filename for TrackStore-generated keys.
+
+        This mapping is reversible only for TrackStore-generated keys that use
+        the store's own storage layout.
+        """
+        return _FILENAME_S3_DELIMITER_ESCAPE.join(S3Client.split(storage_key))
+
+    @staticmethod
+    def _filename_to_s3_key(filename: Filename) -> Key:
+        """Return the TrackStore storage key for a store-generated flat filename."""
+        return S3Client.join(*filename.split(_FILENAME_S3_DELIMITER_ESCAPE))
 
 
 def _uuid7() -> uuid.UUID:
@@ -1173,6 +1529,7 @@ def _applied_preset_to_dict(preset: AppliedPreset | None) -> dict[str, object] |
     return {
         'id': preset.id,
         'version': preset.version,
+        'variant_count': preset.variant_count,
     }
 
 
@@ -1220,17 +1577,20 @@ def _parse_preset_mode(value: object, *, field: str, context: str) -> PresetMode
     )
 
 
-def _parse_applied_preset(value: object) -> AppliedPreset | None:
+def _parse_applied_preset(value: object, *, context: str) -> AppliedPreset | None:
     if value is None:
         return None
     if not isinstance(value, dict):
-        raise ValueError('manifest `preset` must be an object or null')
-    if set(value) != {'id', 'version'}:
-        raise ValueError('manifest `preset` has unexpected fields')
+        raise ValueError(f'{context} `preset` must be an object or null')
+    if set(value) != {'id', 'version', 'variant_count'}:
+        raise ValueError(f'{context} `preset` has unexpected fields')
 
     return AppliedPreset(
-        id=_expect_positive_int(value['id'], field='preset.id', context='manifest'),
-        version=_expect_positive_int(value['version'], field='preset.version', context='manifest'),
+        id=_expect_positive_int(value['id'], field='id', context=f'{context} `preset`'),
+        version=_expect_positive_int(value['version'], field='version', context=f'{context} `preset`'),
+        variant_count=_expect_positive_int(
+            value['variant_count'], field='variant_count', context=f'{context} `preset`'
+        ),
     )
 
 
@@ -1300,13 +1660,6 @@ def _parse_enum(value: object, enum_type: type[_TrackStrEnum], *, field: str, co
         return enum_type(value)
     except ValueError as error:
         raise ValueError(f'{context} `{field}` has unsupported value: {value}') from error
-
-
-def _variant_mode_to_stem(mode: str) -> str:
-    try:
-        return _VARIANT_MODE_TO_STEM[mode]
-    except KeyError as error:
-        raise ValueError(f'Unsupported variant mode: {mode}') from error
 
 
 def _format_sub_season(sub_season: SubSeason) -> str:
