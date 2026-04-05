@@ -332,7 +332,7 @@ async def test_fetch_returns_grouped_clips_with_portable_filenames(
     async def _unexpected_normalize(video_bytes: bytes, *, loudness: float, bitrate: int) -> bytes:
         raise AssertionError('raw fetch must not normalize audio')
 
-    monkeypatch.setattr(clip_store_module, 'normalize_audio_loudness', _unexpected_normalize)
+    monkeypatch.setattr(clip_store_module, 'normalize_video_audio_loudness', _unexpected_normalize)
 
     batches = [
         batch
@@ -420,7 +420,7 @@ async def test_fetch_with_audio_normalization_generates_normalized_twins_and_upd
         calls.append((video_bytes, loudness, bitrate))
         return b'normalized:' + video_bytes
 
-    monkeypatch.setattr(clip_store_module, 'normalize_audio_loudness', _fake_normalize)
+    monkeypatch.setattr(clip_store_module, 'normalize_video_audio_loudness', _fake_normalize)
 
     batches = [
         batch
@@ -546,7 +546,7 @@ async def test_fetch_with_same_audio_normalization_reuses_existing_normalized_tw
     async def _unexpected_normalize(video_bytes: bytes, *, loudness: float, bitrate: int) -> bytes:
         raise AssertionError('existing normalized twins should be reused')
 
-    monkeypatch.setattr(clip_store_module, 'normalize_audio_loudness', _unexpected_normalize)
+    monkeypatch.setattr(clip_store_module, 'normalize_video_audio_loudness', _unexpected_normalize)
 
     batches = [
         batch
@@ -615,7 +615,7 @@ async def test_fetch_with_changed_audio_normalization_overwrites_stable_normaliz
         calls.append((video_bytes, loudness, bitrate))
         return b'new:' + video_bytes
 
-    monkeypatch.setattr(clip_store_module, 'normalize_audio_loudness', _fake_normalize)
+    monkeypatch.setattr(clip_store_module, 'normalize_video_audio_loudness', _fake_normalize)
 
     batches = [
         batch
@@ -717,7 +717,7 @@ async def test_fetch_audio_normalization_runs_sequentially(monkeypatch: pytest.M
         active_calls -= 1
         return b'n:' + video_bytes
 
-    monkeypatch.setattr(clip_store_module, 'normalize_audio_loudness', _fake_normalize)
+    monkeypatch.setattr(clip_store_module, 'normalize_video_audio_loudness', _fake_normalize)
 
     [
         batch
@@ -773,7 +773,7 @@ async def test_fetch_raises_explicit_error_when_manifest_write_fails_after_norma
     async def _fake_normalize(video_bytes: bytes, *, loudness: float, bitrate: int) -> bytes:
         return b'n:' + video_bytes
 
-    monkeypatch.setattr(clip_store_module, 'normalize_audio_loudness', _fake_normalize)
+    monkeypatch.setattr(clip_store_module, 'normalize_video_audio_loudness', _fake_normalize)
 
     with pytest.raises(NormalizedClipManifestSyncError, match='manifest synchronization failed') as excinfo:
         [
@@ -834,7 +834,7 @@ async def test_fetch_raises_explicit_error_when_normalized_write_path_fails_befo
     async def _fake_normalize(video_bytes: bytes, *, loudness: float, bitrate: int) -> bytes:
         return b'n:' + video_bytes
 
-    monkeypatch.setattr(clip_store_module, 'normalize_audio_loudness', _fake_normalize)
+    monkeypatch.setattr(clip_store_module, 'normalize_video_audio_loudness', _fake_normalize)
 
     with pytest.raises(NormalizedClipManifestSyncError, match='stage=before_manifest_write') as excinfo:
         [
@@ -887,7 +887,7 @@ async def test_fetch_regenerates_missing_normalized_twin_when_manifest_says_it_e
         calls.append((video_bytes, loudness, bitrate))
         return b'regenerated:' + video_bytes
 
-    monkeypatch.setattr(clip_store_module, 'normalize_audio_loudness', _fake_normalize)
+    monkeypatch.setattr(clip_store_module, 'normalize_video_audio_loudness', _fake_normalize)
 
     batches = [
         batch

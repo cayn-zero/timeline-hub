@@ -216,7 +216,7 @@ async def probe_audio_sample_rate(
         input_path.unlink(missing_ok=True)
 
 
-async def normalize_audio_loudness(
+async def normalize_video_audio_loudness(
     video_bytes: bytes,
     *,
     loudness: float = -14,

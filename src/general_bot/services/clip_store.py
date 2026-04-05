@@ -9,7 +9,7 @@ from typing import Any, Self, TypeVar
 
 from loguru import logger
 
-from general_bot.infra.ffmpeg import hash_video_content, normalize_audio_loudness
+from general_bot.infra.ffmpeg import hash_video_content, normalize_video_audio_loudness
 from general_bot.infra.s3 import Key, Prefix, S3Client, S3ContentType, S3ObjectNotFoundError
 
 _CLIPS_PREFIX = 'clips'
@@ -1274,7 +1274,7 @@ class ClipStore:
     ) -> bytes:
         raw_clip_key = self._clip_key(clip_group_prefix, entry.id)
         raw_bytes = await self._s3_client.get_bytes(raw_clip_key)
-        normalized_bytes = await normalize_audio_loudness(
+        normalized_bytes = await normalize_video_audio_loudness(
             raw_bytes,
             loudness=audio_normalization.loudness,
             bitrate=audio_normalization.bitrate,
