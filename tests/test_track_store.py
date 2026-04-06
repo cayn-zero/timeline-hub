@@ -210,9 +210,15 @@ def _presets_bytes(*, presets: list[PresetRecord] | None = None) -> bytes:
     return json.dumps(
         Presets(
             presets=list(presets or _sample_stored_presets()),
-        ).to_list(),
+        ).to_dict(),
         separators=(',', ':'),
     ).encode('utf-8')
+
+
+def _presets_payload(*, presets: list[PresetRecord] | None = None) -> dict[str, list[dict[str, object]]]:
+    return Presets(
+        presets=list(presets or _sample_stored_presets()),
+    ).to_dict()
 
 
 def _applied_preset_dict(applied_preset: AppliedPreset) -> dict[str, object]:
@@ -224,7 +230,11 @@ def _applied_preset_dict(applied_preset: AppliedPreset) -> dict[str, object]:
 
 
 def _manifest_bytes(entries: list[ManifestEntry]) -> bytes:
-    return json.dumps(Manifest(entries).to_list(), separators=(',', ':')).encode('utf-8')
+    return json.dumps(Manifest(entries).to_dict(), separators=(',', ':')).encode('utf-8')
+
+
+def _manifest_payload(entries: list[ManifestEntry]) -> dict[str, list[dict[str, object]]]:
+    return Manifest(entries).to_dict()
 
 
 def _patch_uuid7(monkeypatch: pytest.MonkeyPatch, *track_ids: str) -> None:
@@ -262,8 +272,8 @@ def test_season_from_month_uses_exact_mapping() -> None:
     assert Season.from_month(12) is Season.S5
 
 
-def test_presets_from_list_accepts_new_bare_list_schema() -> None:
-    parsed = Presets.from_list(json.loads(_presets_bytes().decode('utf-8')))
+def test_presets_from_list_accepts_data_root_schema() -> None:
+    parsed = Presets.from_dict(json.loads(_presets_bytes().decode('utf-8')))
 
     assert [preset.id for preset in parsed.presets] == [1, 2]
     assert parsed.default_preset() == parsed.presets[0]
@@ -348,38 +358,59 @@ def test_preset_record_rejects_non_positive_identity_fields(
 
 
 def test_presets_reject_duplicate_stored_preset_ids() -> None:
-    payload = [
-        {
-            'id': 1,
-            'version': 1,
-            'preset': {
-                'name': 'default',
-                'slowed': {'step': 0.01, 'levels': 1},
-                'sped_up': None,
-                'reverb_start': 0.0,
-                'reverb_step': 0.0,
+    payload = {
+        'data': [
+            {
+                'id': 1,
+                'version': 1,
+                'preset': {
+                    'name': 'default',
+                    'slowed': {'step': 0.01, 'levels': 1},
+                    'sped_up': None,
+                    'reverb_start': 0.0,
+                    'reverb_step': 0.0,
+                },
             },
-        },
-        {
-            'id': 1,
-            'version': 2,
-            'preset': {
-                'name': 'other',
-                'slowed': {'step': 0.02, 'levels': 1},
-                'sped_up': None,
-                'reverb_start': 0.1,
-                'reverb_step': 0.1,
+            {
+                'id': 1,
+                'version': 2,
+                'preset': {
+                    'name': 'other',
+                    'slowed': {'step': 0.02, 'levels': 1},
+                    'sped_up': None,
+                    'reverb_start': 0.1,
+                    'reverb_step': 0.1,
+                },
             },
-        },
-    ]
+        ],
+    }
 
     with pytest.raises(ValueError, match='duplicate stored preset id'):
-        Presets.from_list(payload)
+        Presets.from_dict(payload)
 
 
 def test_presets_reject_empty_list_construction() -> None:
     with pytest.raises(ValueError, match='Presets.presets must not be empty'):
         Presets(presets=[])
+
+
+def test_presets_from_list_rejects_old_list_root_schema() -> None:
+    with pytest.raises(ValueError, match="presets root must be an object with only 'data'"):
+        Presets.from_dict(
+            [
+                {
+                    'id': 1,
+                    'version': 1,
+                    'preset': {
+                        'name': 'default',
+                        'slowed': {'step': 0.01, 'levels': 1},
+                        'sped_up': None,
+                        'reverb_start': 0.0,
+                        'reverb_step': 0.0,
+                    },
+                }
+            ]
+        )
 
 
 def test_presets_from_list_rejects_old_object_root_schema() -> None:
@@ -399,8 +430,8 @@ def test_presets_from_list_rejects_old_object_root_schema() -> None:
         ],
     }
 
-    with pytest.raises(ValueError, match='presets root must be a list'):
-        Presets.from_list(payload)
+    with pytest.raises(ValueError, match="presets root must be an object with only 'data'"):
+        Presets.from_dict(payload)
 
 
 def test_presets_default_preset_returns_stored_preset() -> None:
@@ -439,13 +470,13 @@ def test_presets_serialization_preserves_insertion_order() -> None:
         ],
     )
 
-    parsed = Presets.from_list(original.to_list())
+    parsed = Presets.from_dict(original.to_dict())
 
     assert [preset.id for preset in parsed.presets] == [2, 1]
-    assert parsed.to_list() == original.to_list()
+    assert parsed.to_dict() == original.to_dict()
 
 
-def test_manifest_uses_top_level_list_with_preferred_field_order() -> None:
+def test_manifest_uses_data_root_with_preferred_field_order() -> None:
     entry = ManifestEntry(
         id=_UUID_1,
         artists=('artist',),
@@ -457,21 +488,23 @@ def test_manifest_uses_top_level_list_with_preferred_field_order() -> None:
         has_instrumental_variants=False,
     )
 
-    payload = Manifest([entry]).to_list()
+    payload = Manifest([entry]).to_dict()
 
-    assert payload == [
-        {
-            'id': _UUID_1,
-            'artists': ['artist'],
-            'title': 'title',
-            'sub_season': 'A',
-            'order': 1,
-            'preset': None,
-            'has_instrumental': False,
-            'has_instrumental_variants': False,
-        }
-    ]
-    assert list(payload[0]) == [
+    assert payload == {
+        'data': [
+            {
+                'id': _UUID_1,
+                'artists': ['artist'],
+                'title': 'title',
+                'sub_season': 'A',
+                'order': 1,
+                'preset': None,
+                'has_instrumental': False,
+                'has_instrumental_variants': False,
+            }
+        ]
+    }
+    assert list(payload['data'][0]) == [
         'id',
         'artists',
         'title',
@@ -481,7 +514,7 @@ def test_manifest_uses_top_level_list_with_preferred_field_order() -> None:
         'has_instrumental',
         'has_instrumental_variants',
     ]
-    assert list(Manifest.from_list(payload)) == [entry]
+    assert list(Manifest.from_dict(payload)) == [entry]
 
 
 def test_manifest_round_trips_has_instrumental_variants() -> None:
@@ -500,21 +533,23 @@ def test_manifest_round_trips_has_instrumental_variants() -> None:
         has_instrumental_variants=True,
     )
 
-    payload = Manifest([entry]).to_list()
+    payload = Manifest([entry]).to_dict()
 
-    assert payload == [
-        {
-            'id': _UUID_1,
-            'artists': ['artist'],
-            'title': 'title',
-            'sub_season': 'A',
-            'order': 1,
-            'preset': {'id': 2, 'version': 5, 'variant_count': 2},
-            'has_instrumental': True,
-            'has_instrumental_variants': True,
-        }
-    ]
-    assert list(Manifest.from_list(payload)) == [entry]
+    assert payload == {
+        'data': [
+            {
+                'id': _UUID_1,
+                'artists': ['artist'],
+                'title': 'title',
+                'sub_season': 'A',
+                'order': 1,
+                'preset': {'id': 2, 'version': 5, 'variant_count': 2},
+                'has_instrumental': True,
+                'has_instrumental_variants': True,
+            }
+        ]
+    }
+    assert list(Manifest.from_dict(payload)) == [entry]
 
 
 def test_manifest_next_order_is_dense_per_sub_season() -> None:
@@ -559,90 +594,98 @@ def test_manifest_next_order_is_dense_per_sub_season() -> None:
 
 def test_manifest_rejects_duplicate_sub_season_order_position() -> None:
     with pytest.raises(ValueError, match='duplicate manifest position for sub_season=A order=1'):
-        Manifest.from_list(
-            [
-                {
-                    'id': _UUID_1,
-                    'artists': ['artist'],
-                    'title': 'title',
-                    'sub_season': 'A',
-                    'order': 1,
-                    'preset': None,
-                    'has_instrumental': False,
-                    'has_instrumental_variants': False,
-                },
-                {
-                    'id': _UUID_2,
-                    'artists': ['artist'],
-                    'title': 'title',
-                    'sub_season': 'A',
-                    'order': 1,
-                    'preset': None,
-                    'has_instrumental': True,
-                    'has_instrumental_variants': False,
-                },
-            ]
+        Manifest.from_dict(
+            {
+                'data': [
+                    {
+                        'id': _UUID_1,
+                        'artists': ['artist'],
+                        'title': 'title',
+                        'sub_season': 'A',
+                        'order': 1,
+                        'preset': None,
+                        'has_instrumental': False,
+                        'has_instrumental_variants': False,
+                    },
+                    {
+                        'id': _UUID_2,
+                        'artists': ['artist'],
+                        'title': 'title',
+                        'sub_season': 'A',
+                        'order': 1,
+                        'preset': None,
+                        'has_instrumental': True,
+                        'has_instrumental_variants': False,
+                    },
+                ]
+            }
         )
 
 
 def test_manifest_rejects_invalid_preset_shape() -> None:
     with pytest.raises(ValueError, match='manifest `preset` has unexpected fields'):
-        Manifest.from_list(
-            [
-                {
-                    'id': _UUID_1,
-                    'artists': ['artist'],
-                    'title': 'title',
-                    'sub_season': 'A',
-                    'order': 1,
-                    'preset': {'preset_id': 2, 'version': 5, 'preset': {}},
-                    'has_instrumental': False,
-                    'has_instrumental_variants': False,
-                }
-            ]
+        Manifest.from_dict(
+            {
+                'data': [
+                    {
+                        'id': _UUID_1,
+                        'artists': ['artist'],
+                        'title': 'title',
+                        'sub_season': 'A',
+                        'order': 1,
+                        'preset': {'preset_id': 2, 'version': 5, 'preset': {}},
+                        'has_instrumental': False,
+                        'has_instrumental_variants': False,
+                    }
+                ]
+            }
         )
 
 
 def test_manifest_rejects_instrumental_variants_without_instrumental() -> None:
     with pytest.raises(ValueError, match=r'manifest `has_instrumental_variants` requires `has_instrumental`'):
-        Manifest.from_list(
-            [
-                {
-                    'id': _UUID_1,
-                    'artists': ['artist'],
-                    'title': 'title',
-                    'sub_season': 'A',
-                    'order': 1,
-                    'preset': _applied_preset_dict(
-                        _applied_preset(
-                            preset_id=2,
-                            version=5,
-                            preset=_preset(name='snap', slowed=PresetMode(step=0.05, levels=1)),
-                            variant_count=1,
-                        )
-                    ),
-                    'has_instrumental': False,
-                    'has_instrumental_variants': True,
-                }
-            ]
+        Manifest.from_dict(
+            {
+                'data': [
+                    {
+                        'id': _UUID_1,
+                        'artists': ['artist'],
+                        'title': 'title',
+                        'sub_season': 'A',
+                        'order': 1,
+                        'preset': _applied_preset_dict(
+                            _applied_preset(
+                                preset_id=2,
+                                version=5,
+                                preset=_preset(name='snap', slowed=PresetMode(step=0.05, levels=1)),
+                                variant_count=1,
+                            )
+                        ),
+                        'has_instrumental': False,
+                        'has_instrumental_variants': True,
+                    }
+                ]
+            }
         )
 
 
 def test_manifest_rejects_instrumental_variants_without_preset() -> None:
     with pytest.raises(ValueError, match=r'manifest `has_instrumental_variants` requires non-null `preset`'):
-        Manifest.from_list(
-            [
-                {
-                    'id': _UUID_1,
-                    'artists': ['artist'],
-                    'title': 'title',
-                    'sub_season': 'A',
-                    'order': 1,
-                    'preset': None,
-                    'has_instrumental': True,
-                    'has_instrumental_variants': True,
-                }
-            ]
+        Manifest.from_dict(
+            {
+                'data': [
+                    {
+                        'id': _UUID_1,
+                        'artists': ['artist'],
+                        'title': 'title',
+                        'sub_season': 'A',
+                        'order': 1,
+                        'preset': None,
+                        'has_instrumental': True,
+                        'has_instrumental_variants': True,
+                    }
+                ]
+            }
         )
 
 
@@ -718,7 +761,7 @@ def test_manifest_rejects_instrumental_variants_without_preset() -> None:
 )
 def test_manifest_rejects_invalid_artists_or_title(entry: dict[str, object], message: str) -> None:
     with pytest.raises(ValueError, match=re.escape(message)):
-        Manifest.from_list([entry])
+        Manifest.from_dict({'data': [entry]})
 
 
 def test_variant_key_uses_ordered_variant_index() -> None:
@@ -758,19 +801,9 @@ async def test_public_methods_bootstrap_presets_from_constructor_and_cache() -> 
     groups = await store.list_groups()
 
     assert groups == []
-    assert json.loads(s3_client.objects[_presets_key()].decode('utf-8')) == [
-        {
-            'id': 1,
-            'version': 1,
-            'preset': {
-                'name': 'Default',
-                'slowed': {'step': 0.08, 'levels': 4},
-                'sped_up': {'step': 0.04, 'levels': 2},
-                'reverb_start': 0.03,
-                'reverb_step': 0.02,
-            },
-        }
-    ]
+    assert json.loads(s3_client.objects[_presets_key()].decode('utf-8')) == _presets_payload(
+        presets=[_stored_preset(preset_id=1, version=1, preset=bootstrap_preset)]
+    )
     assert store._presets_cache == Presets(
         presets=[_stored_preset(preset_id=1, version=1, preset=bootstrap_preset)],
     )
@@ -789,7 +822,7 @@ async def test_existing_s3_presets_win_over_bootstrap_input() -> None:
     assert store._presets_cache == Presets(
         presets=_sample_stored_presets(),
     )
-    assert json.loads(s3_client.objects[_presets_key()].decode('utf-8'))[0]['version'] == 3
+    assert json.loads(s3_client.objects[_presets_key()].decode('utf-8'))['data'][0]['version'] == 3
 
 
 @pytest.mark.asyncio
@@ -836,41 +869,7 @@ async def test_add_preset_appends_new_stored_preset_and_preserves_default_first(
     assert store._presets_cache == Presets(
         presets=expected_presets,
     )
-    assert json.loads(s3_client.objects[_presets_key()].decode('utf-8')) == [
-        {
-            'id': 1,
-            'version': 3,
-            'preset': {
-                'name': 'default',
-                'slowed': {'step': 0.06, 'levels': 3},
-                'sped_up': {'step': 0.06, 'levels': 2},
-                'reverb_start': 0.01,
-                'reverb_step': 0.01,
-            },
-        },
-        {
-            'id': 2,
-            'version': 1,
-            'preset': {
-                'name': 'soft',
-                'slowed': {'step': 0.05, 'levels': 2},
-                'sped_up': None,
-                'reverb_start': 0.02,
-                'reverb_step': 0.01,
-            },
-        },
-        {
-            'id': 3,
-            'version': 1,
-            'preset': {
-                'name': 'hard',
-                'slowed': {'step': 0.09, 'levels': 4},
-                'sped_up': {'step': 0.03, 'levels': 3},
-                'reverb_start': 0.04,
-                'reverb_step': 0.02,
-            },
-        },
-    ]
+    assert json.loads(s3_client.objects[_presets_key()].decode('utf-8')) == _presets_payload(presets=expected_presets)
 
 
 @pytest.mark.asyncio
@@ -897,30 +896,16 @@ async def test_replace_preset_preserves_id_increments_version_and_keeps_default(
             ),
         ],
     )
-    assert json.loads(s3_client.objects[_presets_key()].decode('utf-8')) == [
-        {
-            'id': 1,
-            'version': 3,
-            'preset': {
-                'name': 'default',
-                'slowed': {'step': 0.06, 'levels': 3},
-                'sped_up': {'step': 0.06, 'levels': 2},
-                'reverb_start': 0.01,
-                'reverb_step': 0.01,
-            },
-        },
-        {
-            'id': 2,
-            'version': 2,
-            'preset': {
-                'name': 'updated soft',
-                'slowed': None,
-                'sped_up': {'step': 0.07, 'levels': 5},
-                'reverb_start': 0.08,
-                'reverb_step': 0.03,
-            },
-        },
-    ]
+    assert json.loads(s3_client.objects[_presets_key()].decode('utf-8')) == _presets_payload(
+        presets=[
+            _sample_stored_presets()[0],
+            _stored_preset(
+                preset_id=2,
+                version=2,
+                preset=replacement,
+            ),
+        ]
+    )
 
 
 @pytest.mark.asyncio
@@ -936,30 +921,12 @@ async def test_set_default_preset_reorders_selected_preset_to_front() -> None:
             _sample_stored_presets()[0],
         ],
     )
-    assert json.loads(s3_client.objects[_presets_key()].decode('utf-8')) == [
-        {
-            'id': 2,
-            'version': 1,
-            'preset': {
-                'name': 'soft',
-                'slowed': {'step': 0.05, 'levels': 2},
-                'sped_up': None,
-                'reverb_start': 0.02,
-                'reverb_step': 0.01,
-            },
-        },
-        {
-            'id': 1,
-            'version': 3,
-            'preset': {
-                'name': 'default',
-                'slowed': {'step': 0.06, 'levels': 3},
-                'sped_up': {'step': 0.06, 'levels': 2},
-                'reverb_start': 0.01,
-                'reverb_step': 0.01,
-            },
-        },
-    ]
+    assert json.loads(s3_client.objects[_presets_key()].decode('utf-8')) == _presets_payload(
+        presets=[
+            _sample_stored_presets()[1],
+            _sample_stored_presets()[0],
+        ]
+    )
 
 
 @pytest.mark.asyncio
@@ -987,19 +954,9 @@ async def test_remove_preset_removes_non_default_preset() -> None:
     assert store._presets_cache == Presets(
         presets=[_sample_stored_presets()[0]],
     )
-    assert json.loads(s3_client.objects[_presets_key()].decode('utf-8')) == [
-        {
-            'id': 1,
-            'version': 3,
-            'preset': {
-                'name': 'default',
-                'slowed': {'step': 0.06, 'levels': 3},
-                'sped_up': {'step': 0.06, 'levels': 2},
-                'reverb_start': 0.01,
-                'reverb_step': 0.01,
-            },
-        }
-    ]
+    assert json.loads(s3_client.objects[_presets_key()].decode('utf-8')) == _presets_payload(
+        presets=[_sample_stored_presets()[0]]
+    )
 
 
 @pytest.mark.asyncio
@@ -1354,30 +1311,22 @@ async def test_store_track_creates_new_group_and_manifest_entry(monkeypatch: pyt
     assert result is None
     assert s3_client.objects[track_key] == b'track'
     assert s3_client.objects[cover_key] == b'cover'
-    assert json.loads(s3_client.objects[manifest_key].decode('utf-8')) == [
-        {
-            'id': _UUID_1,
-            'artists': ['artist one', 'artist two'],
-            'title': 'Track Title',
-            'sub_season': 'A',
-            'order': 1,
-            'preset': None,
-            'has_instrumental': False,
-            'has_instrumental_variants': False,
-        }
-    ]
-    assert store._manifest_cache[cache_key].to_list() == [
-        {
-            'id': _UUID_1,
-            'artists': ['artist one', 'artist two'],
-            'title': 'Track Title',
-            'sub_season': 'A',
-            'order': 1,
-            'preset': None,
-            'has_instrumental': False,
-            'has_instrumental_variants': False,
-        }
-    ]
+    expected_manifest = _manifest_payload(
+        [
+            ManifestEntry(
+                id=_UUID_1,
+                artists=('artist one', 'artist two'),
+                title='Track Title',
+                sub_season=SubSeason.A,
+                order=1,
+                preset=None,
+                has_instrumental=False,
+                has_instrumental_variants=False,
+            )
+        ]
+    )
+    assert json.loads(s3_client.objects[manifest_key].decode('utf-8')) == expected_manifest
+    assert store._manifest_cache[cache_key].to_dict() == expected_manifest
     assert probe_calls == [b'track']
 
 
@@ -1424,38 +1373,40 @@ async def test_store_track_uses_dense_order_within_sub_season_only(monkeypatch: 
         sub_season=SubSeason.A,
     )
 
-    assert json.loads(store._s3_client.objects[manifest_key].decode('utf-8')) == [
-        {
-            'id': _UUID_1,
-            'artists': ['artist'],
-            'title': 'title',
-            'sub_season': 'A',
-            'order': 1,
-            'preset': None,
-            'has_instrumental': False,
-            'has_instrumental_variants': False,
-        },
-        {
-            'id': _UUID_3,
-            'artists': ['artist'],
-            'title': 'title',
-            'sub_season': 'B',
-            'order': 1,
-            'preset': None,
-            'has_instrumental': False,
-            'has_instrumental_variants': False,
-        },
-        {
-            'id': _UUID_2,
-            'artists': ['artist'],
-            'title': 'title',
-            'sub_season': 'A',
-            'order': 2,
-            'preset': None,
-            'has_instrumental': False,
-            'has_instrumental_variants': False,
-        },
-    ]
+    assert json.loads(store._s3_client.objects[manifest_key].decode('utf-8')) == _manifest_payload(
+        [
+            ManifestEntry(
+                id=_UUID_1,
+                artists=('artist',),
+                title='title',
+                sub_season=SubSeason.A,
+                order=1,
+                preset=None,
+                has_instrumental=False,
+                has_instrumental_variants=False,
+            ),
+            ManifestEntry(
+                id=_UUID_3,
+                artists=('artist',),
+                title='title',
+                sub_season=SubSeason.B,
+                order=1,
+                preset=None,
+                has_instrumental=False,
+                has_instrumental_variants=False,
+            ),
+            ManifestEntry(
+                id=_UUID_2,
+                artists=('artist',),
+                title='title',
+                sub_season=SubSeason.A,
+                order=2,
+                preset=None,
+                has_instrumental=False,
+                has_instrumental_variants=False,
+            ),
+        ]
+    )
 
 
 @pytest.mark.asyncio
@@ -1634,52 +1585,35 @@ async def test_store_instrumental_uploads_and_rewrites_manifest_for_existing_tra
     )
 
     assert s3_client.objects[instrumental_key] == b'new-instrumental'
-    assert json.loads(s3_client.objects[manifest_key].decode('utf-8')) == [
-        {
-            'id': _UUID_1,
-            'artists': ['artist one'],
-            'title': 'title one',
-            'sub_season': 'A',
-            'order': 1,
-            'preset': _applied_preset_dict(_applied_preset(preset_id=2, version=5)),
-            'has_instrumental': True,
-            'has_instrumental_variants': False,
-        },
-        {
-            'id': _UUID_2,
-            'artists': ['artist two'],
-            'title': 'title two',
-            'sub_season': 'B',
-            'order': 1,
-            'preset': None,
-            'has_instrumental': True,
-            'has_instrumental_variants': False,
-        },
-    ]
-    assert store._manifest_cache[
-        _track_group_prefix(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
-    ].to_list() == [
-        {
-            'id': _UUID_1,
-            'artists': ['artist one'],
-            'title': 'title one',
-            'sub_season': 'A',
-            'order': 1,
-            'preset': _applied_preset_dict(_applied_preset(preset_id=2, version=5)),
-            'has_instrumental': True,
-            'has_instrumental_variants': False,
-        },
-        {
-            'id': _UUID_2,
-            'artists': ['artist two'],
-            'title': 'title two',
-            'sub_season': 'B',
-            'order': 1,
-            'preset': None,
-            'has_instrumental': True,
-            'has_instrumental_variants': False,
-        },
-    ]
+    expected_manifest = _manifest_payload(
+        [
+            ManifestEntry(
+                id=_UUID_1,
+                artists=('artist one',),
+                title='title one',
+                sub_season=SubSeason.A,
+                order=1,
+                preset=_applied_preset(preset_id=2, version=5),
+                has_instrumental=True,
+                has_instrumental_variants=False,
+            ),
+            ManifestEntry(
+                id=_UUID_2,
+                artists=('artist two',),
+                title='title two',
+                sub_season=SubSeason.B,
+                order=1,
+                preset=None,
+                has_instrumental=True,
+                has_instrumental_variants=False,
+            ),
+        ]
+    )
+    assert json.loads(s3_client.objects[manifest_key].decode('utf-8')) == expected_manifest
+    assert (
+        store._manifest_cache[_track_group_prefix(universe=TrackUniverse.WEST, year=2026, season=Season.S1)].to_dict()
+        == expected_manifest
+    )
     assert probe_calls == [b'new-instrumental']
 
 
@@ -1822,18 +1756,20 @@ async def test_store_instrumental_raises_sync_error_and_keeps_uploaded_object_wh
     assert s3_client.objects[manifest_key] == original_manifest_payload
     assert store._manifest_cache[
         _track_group_prefix(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
-    ].to_list() == [
-        {
-            'id': _UUID_1,
-            'artists': ['artist'],
-            'title': 'title',
-            'sub_season': 'A',
-            'order': 1,
-            'preset': _applied_preset_dict(_applied_preset(preset_id=2, version=5)),
-            'has_instrumental': False,
-            'has_instrumental_variants': False,
-        }
-    ]
+    ].to_dict() == _manifest_payload(
+        [
+            ManifestEntry(
+                id=_UUID_1,
+                artists=('artist',),
+                title='title',
+                sub_season=SubSeason.A,
+                order=1,
+                preset=_applied_preset(preset_id=2, version=5),
+                has_instrumental=False,
+                has_instrumental_variants=False,
+            )
+        ]
+    )
 
 
 @pytest.mark.asyncio
@@ -2188,10 +2124,10 @@ async def test_fetch_regenerates_original_variants_when_preset_id_mismatches(mon
         b'authoritative-track|1.12|0.02',
     ]
     rewritten_manifest = json.loads(s3_client.objects[manifest_key].decode('utf-8'))
-    assert rewritten_manifest[0]['preset'] == _applied_preset_dict(
+    assert rewritten_manifest['data'][0]['preset'] == _applied_preset_dict(
         _applied_preset(preset_id=1, version=3, preset=_sample_stored_presets()[0].preset)
     )
-    assert rewritten_manifest[0]['has_instrumental_variants'] is False
+    assert rewritten_manifest['data'][0]['has_instrumental_variants'] is False
 
 
 @pytest.mark.asyncio
@@ -2360,7 +2296,7 @@ async def test_fetch_regenerates_instrumental_variants_when_manifest_flag_is_fal
     assert result.instrumental_variants is not None
     assert all(call[0] == b'authoritative-instrumental' for call in generation_calls)
     rewritten_manifest = json.loads(s3_client.objects[manifest_key].decode('utf-8'))
-    assert rewritten_manifest[0]['has_instrumental_variants'] is True
+    assert rewritten_manifest['data'][0]['has_instrumental_variants'] is True
 
 
 @pytest.mark.asyncio

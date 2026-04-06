@@ -144,11 +144,11 @@ def _manifest_key(*, year: int, season: Season, universe: Universe) -> str:
 
 
 def _manifest_bytes(entries: list[ManifestEntry]) -> bytes:
-    return json.dumps(Manifest(entries).to_list(), separators=(',', ':')).encode('utf-8')
+    return json.dumps(Manifest(entries).to_dict(), separators=(',', ':')).encode('utf-8')
 
 
-def _manifest_payload(entries: list[ManifestEntry]) -> list[dict[str, object]]:
-    return Manifest(entries).to_list()
+def _manifest_payload(entries: list[ManifestEntry]) -> dict[str, list[dict[str, object]]]:
+    return Manifest(entries).to_dict()
 
 
 def _normalized_clip_key(*, year: int, season: Season, universe: Universe, clip_id: str) -> str:
@@ -168,7 +168,7 @@ def _patch_uuid7(monkeypatch: pytest.MonkeyPatch, *clip_ids: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_manifest_uses_top_level_list_with_preferred_field_order() -> None:
+async def test_manifest_uses_data_root_with_preferred_field_order() -> None:
     entry = ManifestEntry(
         id=_UUID_1,
         video_hash=_HASH_A,
@@ -179,42 +179,59 @@ async def test_manifest_uses_top_level_list_with_preferred_field_order() -> None
         audio_normalization=AudioNormalization(loudness=-14, bitrate=128),
     )
 
-    payload = Manifest([entry]).to_list()
+    payload = Manifest([entry]).to_dict()
 
-    assert payload == [
-        {
-            'id': _UUID_1,
-            'video_hash': _HASH_A,
-            'audio_normalization': {'loudness': -14, 'bitrate': 128},
-            'sub_season': 'A',
-            'scope': 'collection',
-            'batch': 1,
-            'order': 1,
-        }
+    assert payload == {
+        'data': [
+            {
+                'id': _UUID_1,
+                'video_hash': _HASH_A,
+                'audio_normalization': {'loudness': -14, 'bitrate': 128},
+                'sub_season': 'A',
+                'scope': 'collection',
+                'batch': 1,
+                'order': 1,
+            }
+        ]
+    }
+    assert list(payload['data'][0]) == [
+        'id',
+        'video_hash',
+        'audio_normalization',
+        'sub_season',
+        'scope',
+        'batch',
+        'order',
     ]
-    assert list(payload[0]) == ['id', 'video_hash', 'audio_normalization', 'sub_season', 'scope', 'batch', 'order']
-    assert list(Manifest.from_list(payload)) == [entry]
+    assert list(Manifest.from_dict(payload)) == [entry]
 
 
 def test_manifest_rejects_old_object_wrapper_shape() -> None:
-    with pytest.raises(ValueError, match='manifest root must be a list'):
-        Manifest.from_list({'clips': []})
+    with pytest.raises(ValueError, match="manifest root must be an object with only 'data'"):
+        Manifest.from_dict({'clips': []})
+
+
+def test_manifest_rejects_old_list_root_shape() -> None:
+    with pytest.raises(ValueError, match="manifest root must be an object with only 'data'"):
+        Manifest.from_dict([])
 
 
 def test_manifest_rejects_legacy_null_sub_season() -> None:
     with pytest.raises(ValueError, match='manifest `sub_season` must be a string'):
-        Manifest.from_list(
-            [
-                {
-                    'id': _UUID_1,
-                    'video_hash': _HASH_A,
-                    'audio_normalization': None,
-                    'sub_season': None,
-                    'scope': 'extra',
-                    'batch': 1,
-                    'order': 1,
-                }
-            ]
+        Manifest.from_dict(
+            {
+                'data': [
+                    {
+                        'id': _UUID_1,
+                        'video_hash': _HASH_A,
+                        'audio_normalization': None,
+                        'sub_season': None,
+                        'scope': 'extra',
+                        'batch': 1,
+                        'order': 1,
+                    }
+                ]
+            }
         )
 
 
@@ -242,7 +259,7 @@ def test_manifest_rejects_non_positive_batch_and_order(
     payload[field] = value
 
     with pytest.raises(ValueError, match=expected_message):
-        Manifest.from_list([payload])
+        Manifest.from_dict({'data': [payload]})
 
 
 def test_manifest_rejects_duplicate_batch_order_position() -> None:
@@ -250,27 +267,29 @@ def test_manifest_rejects_duplicate_batch_order_position() -> None:
         ValueError,
         match='duplicate manifest position for sub_season=A scope=collection batch=2 order=1',
     ):
-        Manifest.from_list(
-            [
-                {
-                    'id': _UUID_1,
-                    'video_hash': _HASH_A,
-                    'audio_normalization': None,
-                    'sub_season': 'A',
-                    'scope': 'collection',
-                    'batch': 2,
-                    'order': 1,
-                },
-                {
-                    'id': _UUID_2,
-                    'video_hash': _HASH_B,
-                    'audio_normalization': None,
-                    'sub_season': 'A',
-                    'scope': 'collection',
-                    'batch': 2,
-                    'order': 1,
-                },
-            ]
+        Manifest.from_dict(
+            {
+                'data': [
+                    {
+                        'id': _UUID_1,
+                        'video_hash': _HASH_A,
+                        'audio_normalization': None,
+                        'sub_season': 'A',
+                        'scope': 'collection',
+                        'batch': 2,
+                        'order': 1,
+                    },
+                    {
+                        'id': _UUID_2,
+                        'video_hash': _HASH_B,
+                        'audio_normalization': None,
+                        'sub_season': 'A',
+                        'scope': 'collection',
+                        'batch': 2,
+                        'order': 1,
+                    },
+                ]
+            }
         )
 
 
@@ -1698,7 +1717,7 @@ async def test_store_all_duplicates_do_not_create_new_batch(monkeypatch: pytest.
     )
 
     assert result == StoreResult(stored_count=0, duplicate_count=1)
-    assert json.loads(s3_client.objects[manifest_key].decode('utf-8')) == Manifest(original_manifest).to_list()
+    assert json.loads(s3_client.objects[manifest_key].decode('utf-8')) == Manifest(original_manifest).to_dict()
     assert s3_client.put_calls == []
 
 
@@ -1743,7 +1762,7 @@ async def test_store_propagates_first_clip_upload_failure_without_sync_error(
     assert manifest_key not in [call[0] for call in s3_client.put_calls]
     assert clip_key not in s3_client.objects
     assert s3_client.deleted_keys == []
-    assert store._manifest_cache[clip_group_prefix].to_list() == Manifest(original_manifest).to_list()
+    assert store._manifest_cache[clip_group_prefix].to_dict() == Manifest(original_manifest).to_dict()
 
 
 @pytest.mark.asyncio
@@ -1801,7 +1820,7 @@ async def test_store_raises_sync_error_when_later_clip_upload_fails(
     assert s3_client.objects[manifest_key] == _manifest_bytes(original_manifest)
     assert manifest_key not in [call[0] for call in s3_client.put_calls]
     assert s3_client.deleted_keys == []
-    assert store._manifest_cache[clip_group_prefix].to_list() == Manifest(original_manifest).to_list()
+    assert store._manifest_cache[clip_group_prefix].to_dict() == Manifest(original_manifest).to_dict()
 
 
 @pytest.mark.asyncio
@@ -1857,7 +1876,7 @@ async def test_store_raises_sync_error_when_manifest_write_fails(
     assert s3_client.objects[second_clip_key] == b'second'
     assert s3_client.objects[manifest_key] == _manifest_bytes(original_manifest)
     assert s3_client.deleted_keys == []
-    assert store._manifest_cache[clip_group_prefix].to_list() == Manifest(original_manifest).to_list()
+    assert store._manifest_cache[clip_group_prefix].to_dict() == Manifest(original_manifest).to_dict()
 
 
 @pytest.mark.asyncio
@@ -2317,7 +2336,7 @@ async def test_reconcile_updates_cache_even_if_removed_delete_fails() -> None:
             )
         ]
     )
-    assert list(store._manifest_cache.values())[0].to_list() == expected_manifest
+    assert list(store._manifest_cache.values())[0].to_dict() == expected_manifest
     assert json.loads(s3_client.objects[manifest_key].decode('utf-8')) == expected_manifest
 
 
@@ -2450,7 +2469,7 @@ async def test_compact_preserves_relative_order_while_rewriting_positions() -> N
         batch_size=2,
     )
 
-    rewritten_manifest = Manifest.from_list(json.loads(s3_client.objects[manifest_key].decode('utf-8')))
+    rewritten_manifest = Manifest.from_dict(json.loads(s3_client.objects[manifest_key].decode('utf-8')))
     compacted_entries = sorted(
         (entry for entry in rewritten_manifest if entry.sub_season is SubSeason.A and entry.scope is Scope.COLLECTION),
         key=lambda entry: (entry.batch, entry.order),
@@ -2516,7 +2535,7 @@ async def test_compact_only_affects_specified_sub_group_and_leaves_others_unchan
         batch_size=2,
     )
 
-    rewritten_manifest = Manifest.from_list(json.loads(s3_client.objects[manifest_key].decode('utf-8')))
+    rewritten_manifest = Manifest.from_dict(json.loads(s3_client.objects[manifest_key].decode('utf-8')))
     rewritten_other_entries = [
         entry
         for entry in rewritten_manifest
@@ -2737,7 +2756,7 @@ async def test_compact_with_batch_size_ten_creates_dense_batches_with_final_part
         batch_size=10,
     )
 
-    rewritten_manifest = Manifest.from_list(json.loads(s3_client.objects[manifest_key].decode('utf-8')))
+    rewritten_manifest = Manifest.from_dict(json.loads(s3_client.objects[manifest_key].decode('utf-8')))
     compacted_entries = sorted(
         (entry for entry in rewritten_manifest if entry.sub_season is SubSeason.A and entry.scope is Scope.COLLECTION),
         key=lambda entry: (entry.batch, entry.order),

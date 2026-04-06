@@ -195,30 +195,32 @@ class Manifest:
             + 1
         )
 
-    def to_list(self) -> list[dict[str, Any]]:
+    def to_dict(self) -> dict[str, list[dict[str, Any]]]:
         """Convert the manifest into its JSON-compatible shape."""
-        return [
-            {
-                'id': entry.id,
-                'video_hash': entry.video_hash,
-                'audio_normalization': (
-                    None
-                    if entry.audio_normalization is None
-                    else {
-                        'loudness': entry.audio_normalization.loudness,
-                        'bitrate': entry.audio_normalization.bitrate,
-                    }
-                ),
-                'sub_season': entry.sub_season.value,
-                'scope': entry.scope.value,
-                'batch': entry.batch,
-                'order': entry.order,
-            }
-            for entry in self._entries
-        ]
+        return {
+            'data': [
+                {
+                    'id': entry.id,
+                    'video_hash': entry.video_hash,
+                    'audio_normalization': (
+                        None
+                        if entry.audio_normalization is None
+                        else {
+                            'loudness': entry.audio_normalization.loudness,
+                            'bitrate': entry.audio_normalization.bitrate,
+                        }
+                    ),
+                    'sub_season': entry.sub_season.value,
+                    'scope': entry.scope.value,
+                    'batch': entry.batch,
+                    'order': entry.order,
+                }
+                for entry in self._entries
+            ]
+        }
 
     @classmethod
-    def from_list(cls, data: object) -> Self:
+    def from_dict(cls, data: object) -> Self:
         """Build a manifest from a decoded JSON payload.
 
         Args:
@@ -227,15 +229,21 @@ class Manifest:
         Raises:
             ValueError: If the payload does not match the manifest schema.
         """
-        if not isinstance(data, list):
-            raise ValueError('manifest root must be a list')
+        if not isinstance(data, dict):
+            raise ValueError("manifest root must be an object with only 'data'")
+        if set(data) != {'data'}:
+            raise ValueError("manifest root must be an object with only 'data'")
+
+        raw_entries = data['data']
+        if not isinstance(raw_entries, list):
+            raise ValueError("manifest 'data' must be a list")
 
         entries: list[ManifestEntry] = []
         seen_ids: set[ClipId] = set()
         seen_hashes: set[str] = set()
         seen_positions: set[tuple[SubSeason, Scope, int, int]] = set()
 
-        for raw_entry in data:
+        for raw_entry in raw_entries:
             if not isinstance(raw_entry, dict):
                 raise ValueError('manifest clip entry must be an object')
             if set(raw_entry) != {
@@ -1153,7 +1161,7 @@ class ClipStore:
 
         try:
             decoded_manifest = json.loads(raw_manifest.decode('utf-8'))
-            return Manifest.from_list(decoded_manifest)
+            return Manifest.from_dict(decoded_manifest)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
             raise ManifestCorruptedError(manifest_key, str(error)) from error
 
@@ -1164,7 +1172,7 @@ class ClipStore:
         manifest: Manifest,
     ) -> None:
         manifest_key = self._manifest_key(clip_group_prefix)
-        manifest_payload = json.dumps(manifest.to_list(), separators=(',', ':')).encode('utf-8')
+        manifest_payload = json.dumps(manifest.to_dict(), separators=(',', ':')).encode('utf-8')
         await self._s3_client.put_bytes(
             manifest_key,
             manifest_payload,

@@ -310,20 +310,22 @@ class Presets:
         """Return the current default stored preset."""
         return self.presets[0]
 
-    def to_list(self) -> list[dict[str, object]]:
-        """Convert presets into their JSON-compatible storage list shape."""
-        return [
-            {
-                'id': preset.id,
-                'version': preset.version,
-                'preset': _preset_to_dict(preset.preset),
-            }
-            for preset in self.presets
-        ]
+    def to_dict(self) -> dict[str, list[dict[str, object]]]:
+        """Convert presets into their JSON-compatible storage shape."""
+        return {
+            'data': [
+                {
+                    'id': preset.id,
+                    'version': preset.version,
+                    'preset': _preset_to_dict(preset.preset),
+                }
+                for preset in self.presets
+            ]
+        }
 
     @classmethod
-    def from_list(cls, data: object) -> Self:
-        """Build presets from a decoded JSON list payload.
+    def from_dict(cls, data: object) -> Self:
+        """Build presets from a decoded JSON payload.
 
         Args:
             data: Decoded JSON value from `tracks/presets.json`.
@@ -331,14 +333,20 @@ class Presets:
         Raises:
             ValueError: If the payload does not match the preset schema.
         """
-        if not isinstance(data, list):
-            raise ValueError('presets root must be a list')
-        if not data:
-            raise ValueError('presets root must not be empty')
+        if not isinstance(data, dict):
+            raise ValueError("presets root must be an object with only 'data'")
+        if set(data) != {'data'}:
+            raise ValueError("presets root must be an object with only 'data'")
+
+        raw_presets = data['data']
+        if not isinstance(raw_presets, list):
+            raise ValueError("presets 'data' must be a list")
+        if not raw_presets:
+            raise ValueError("presets 'data' must not be empty")
 
         presets: list[PresetRecord] = []
         seen_ids: set[int] = set()
-        for raw_preset in data:
+        for raw_preset in raw_presets:
             if not isinstance(raw_preset, dict):
                 raise ValueError('presets preset entry must be an object')
             if set(raw_preset) != {'id', 'version', 'preset'}:
@@ -442,24 +450,26 @@ class Manifest:
         """Return the next dense 1-based order within the provided sub-season."""
         return max((entry.order for entry in self._entries if entry.sub_season is sub_season), default=0) + 1
 
-    def to_list(self) -> list[dict[str, object]]:
+    def to_dict(self) -> dict[str, list[dict[str, object]]]:
         """Convert the manifest into its JSON-compatible storage shape."""
-        return [
-            {
-                'id': entry.id,
-                'artists': list(entry.artists),
-                'title': entry.title,
-                'sub_season': entry.sub_season.value,
-                'order': entry.order,
-                'preset': _applied_preset_to_dict(entry.preset),
-                'has_instrumental': entry.has_instrumental,
-                'has_instrumental_variants': entry.has_instrumental_variants,
-            }
-            for entry in self._entries
-        ]
+        return {
+            'data': [
+                {
+                    'id': entry.id,
+                    'artists': list(entry.artists),
+                    'title': entry.title,
+                    'sub_season': entry.sub_season.value,
+                    'order': entry.order,
+                    'preset': _applied_preset_to_dict(entry.preset),
+                    'has_instrumental': entry.has_instrumental,
+                    'has_instrumental_variants': entry.has_instrumental_variants,
+                }
+                for entry in self._entries
+            ]
+        }
 
     @classmethod
-    def from_list(cls, data: object) -> Self:
+    def from_dict(cls, data: object) -> Self:
         """Build a manifest from a decoded JSON payload.
 
         Args:
@@ -468,14 +478,20 @@ class Manifest:
         Raises:
             ValueError: If the payload does not match the manifest schema.
         """
-        if not isinstance(data, list):
-            raise ValueError('manifest root must be a list')
+        if not isinstance(data, dict):
+            raise ValueError("manifest root must be an object with only 'data'")
+        if set(data) != {'data'}:
+            raise ValueError("manifest root must be an object with only 'data'")
+
+        raw_entries = data['data']
+        if not isinstance(raw_entries, list):
+            raise ValueError("manifest 'data' must be a list")
 
         entries: list[ManifestEntry] = []
         seen_ids: set[TrackId] = set()
         seen_positions: set[tuple[SubSeason, int]] = set()
 
-        for raw_entry in data:
+        for raw_entry in raw_entries:
             if not isinstance(raw_entry, dict):
                 raise ValueError('manifest track entry must be an object')
             if set(raw_entry) != {
@@ -1187,7 +1203,7 @@ class TrackStore:
             presets = self._bootstrap_presets()
             await self._s3_client.put_bytes(
                 presets_key,
-                json.dumps(presets.to_list(), separators=(',', ':')).encode('utf-8'),
+                json.dumps(presets.to_dict(), separators=(',', ':')).encode('utf-8'),
                 content_type=S3ContentType.JSON,
             )
             self._presets_cache = presets
@@ -1195,7 +1211,7 @@ class TrackStore:
 
         try:
             decoded_presets = json.loads(raw_presets.decode('utf-8'))
-            presets = Presets.from_list(decoded_presets)
+            presets = Presets.from_dict(decoded_presets)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
             raise TrackPresetsCorruptedError(presets_key, str(error)) from error
 
@@ -1214,7 +1230,7 @@ class TrackStore:
 
     async def _write_presets_and_update_cache(self, presets: Presets) -> None:
         presets_key = self._presets_key()
-        presets_payload = json.dumps(presets.to_list(), separators=(',', ':')).encode('utf-8')
+        presets_payload = json.dumps(presets.to_dict(), separators=(',', ':')).encode('utf-8')
         await self._s3_client.put_bytes(
             presets_key,
             presets_payload,
@@ -1271,7 +1287,7 @@ class TrackStore:
 
         try:
             decoded_manifest = json.loads(raw_manifest.decode('utf-8'))
-            return Manifest.from_list(decoded_manifest)
+            return Manifest.from_dict(decoded_manifest)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
             raise TrackManifestCorruptedError(manifest_key, str(error)) from error
 
@@ -1282,7 +1298,7 @@ class TrackStore:
         manifest: Manifest,
     ) -> None:
         manifest_key = self._manifest_key(track_group_prefix)
-        manifest_payload = json.dumps(manifest.to_list(), separators=(',', ':')).encode('utf-8')
+        manifest_payload = json.dumps(manifest.to_dict(), separators=(',', ':')).encode('utf-8')
         await self._s3_client.put_bytes(
             manifest_key,
             manifest_payload,
