@@ -323,6 +323,12 @@ Core rule:
 - do not describe the last edited function, the most recent follow-up, the loudest error path, or a local implementation detail
 - describe the resulting capability or behavior at system level, not the mechanical patch that happened to be edited last
 
+Commit generation source of truth:
+- infer the commit message from the final staged diff first
+- use conversation context only to disambiguate intent, not to override the diff
+- if the work happened across multiple follow-ups or fragmented sessions, synthesize the commit from the final resulting change, not from the most recent patch
+- prefer reviewer-style interpretation of the completed diff over builder-style narration of the latest edit
+
 Allowed types:
 - feat
 - fix
@@ -377,7 +383,13 @@ Commit subject prioritization:
   - the last bug fixed during review
   - rollback/error-path work that only supports a broader feature
   - internal representation wording when the externally meaningful change is clearer
-- - when the diff changes rules for a specific actor (for example agents), preserve that actor in the subject instead of generalizing to repository-wide wording
+- when the diff changes rules for a specific actor (for example agents), preserve that actor in the subject instead of generalizing to repository-wide wording
+
+Large refactors:
+- when the dominant result is architectural extraction, responsibility reassignment, or API-surface simplification, name that in the subject
+- prefer concrete verbs such as `extract`, `move`, `separate`, `delegate`, `unify`, `simplify`
+- avoid vague verbs like `centralize`, `improve`, or `update` when a clearer structural change exists
+- keep resolver, fallback, validation, and invariant-tightening details in the body unless they are the primary change
 
 Prefer outcome-oriented wording:
 - prefer `cache normalized clips`
