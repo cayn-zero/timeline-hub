@@ -616,7 +616,12 @@ class TrackInvalidAudioFormatError(ValueError):
 
 
 class TrackManifestSyncError(RuntimeError):
-    """Raised when staged track-store writes leave uploaded objects unsynchronized."""
+    """Raised when staged track-store writes are not synchronized back into manifest state.
+
+    `written_keys` identifies the objects already mutated in S3 before the
+    failing stage. Those keys are the basis for manual recovery, cleanup, or
+    completion after the manifest failed to become authoritative again.
+    """
 
     def __init__(
         self,
@@ -638,7 +643,12 @@ class TrackManifestSyncError(RuntimeError):
 
 
 class TrackUpdateManifestSyncError(RuntimeError):
-    """Raised when staged update mutations cannot be synchronized with manifest state."""
+    """Raised when staged update mutations are not synchronized back into manifest state.
+
+    `touched_keys` identifies the objects already mutated in S3 before the
+    failing stage. Those keys are the basis for manual recovery, cleanup, or
+    completion after the manifest failed to become authoritative again.
+    """
 
     def __init__(
         self,
@@ -659,8 +669,40 @@ class TrackUpdateManifestSyncError(RuntimeError):
         )
 
 
+class TrackRemoveManifestSyncError(RuntimeError):
+    """Raised when staged remove mutations are not synchronized back into manifest state.
+
+    `touched_keys` identifies the objects already mutated in S3 before the
+    failing stage. Those keys are the basis for manual recovery, cleanup, or
+    completion after the manifest failed to become authoritative again.
+    """
+
+    def __init__(
+        self,
+        *,
+        stage: str,
+        track_id: TrackId,
+        touched_keys: Iterable[Key],
+        manifest_key: Key,
+    ) -> None:
+        self.stage = stage
+        self.track_id = track_id
+        self.touched_keys = tuple(touched_keys)
+        self.manifest_key = manifest_key
+        super().__init__(
+            f'Staged track remove failed at {self.stage} for track id {self.track_id}; '
+            f'touched keys: {list(self.touched_keys)}; '
+            f'manifest key not synchronized: {self.manifest_key}'
+        )
+
+
 class TrackFetchManifestSyncError(RuntimeError):
-    """Raised when fetch-time cache mutations cannot be synchronized with manifest state."""
+    """Raised when fetch-time cache mutations are not synchronized back into manifest state.
+
+    `touched_keys` identifies the cache objects already mutated in S3 before
+    the failing stage. Those keys are the basis for manual recovery, cleanup,
+    or completion after the manifest failed to become authoritative again.
+    """
 
     def __init__(
         self,
@@ -879,6 +921,15 @@ class TrackStore:
     The group manifest is authoritative for logical tracks in a `TrackGroup`.
     Store-path reads use copy-safe manifests so writes can stage updates before
     commit, while read-path calls may reuse the cached manifest directly.
+
+    Authoritative-state invariant:
+        Normal-path operations assume each group's manifest is synchronized
+        with the authoritative and cache objects it governs. If staged S3
+        mutations succeed but manifest persistence fails later, that divergence
+        is treated as an explicit sync-failure state surfaced by the
+        `Track*SyncError` exceptions. Ordinary methods do not act as recovery
+        or orphan-sweeping APIs for that state; manual recovery is expected
+        from the written or touched keys carried by those exceptions.
 
     Store writes media objects before persisting the authoritative group
     manifest. If manifest persistence fails after object upload succeeds, the
@@ -1295,6 +1346,266 @@ class TrackStore:
                     touched_keys=touched_keys,
                     manifest_key=manifest_key,
                     note_prefix='Update manifest write error',
+                )
+            ) is None:
+                raise
+            raise sync_error from error
+
+    async def remove(self, group: TrackGroup, track_id: TrackId) -> None:
+        """Remove one track and all related authoritative and cached objects.
+
+        Removal is driven strictly by the authoritative manifest entry for the
+        provided `(group, track_id)`. This method deletes only the objects that
+        entry implies and rewrites manifest state accordingly. It does not scan
+        storage for stray or orphaned objects left behind by earlier sync
+        failures.
+
+        Raises:
+            TrackManifestCorruptedError: If the target group's manifest exists but is malformed.
+            TrackGroupNotFoundError: If the target group's manifest does not exist.
+            ValueError: If `track_id` does not exist in the provided group's manifest.
+            TrackRemoveManifestSyncError: If one or more object mutations are applied but a later stage fails.
+        """
+        track_group_prefix = self._track_group_prefix(
+            universe=group.universe,
+            year=group.year,
+            season=group.season,
+        )
+        manifest = (await self._require_group_manifest(group, sub_season=None)).copy()
+        entry = self._require_manifest_entry(manifest, group=group, track_id=track_id)
+
+        track_key = self._track_key(track_group_prefix, track_id)
+        cover_key = self._cover_key(track_group_prefix, track_id)
+        instrumental_key = self._instrumental_key(track_group_prefix, track_id)
+        manifest_key = self._manifest_key(track_group_prefix)
+        touched_keys: list[Key] = []
+
+        # Remove only the object families implied by authoritative manifest state.
+        for key, stage, note_prefix in (
+            (track_key, 'track_delete', 'Original track delete error'),
+            (cover_key, 'cover_delete', 'Cover delete error'),
+        ):
+            try:
+                await self._s3_client.delete_key(key)
+            except Exception as error:
+                if (
+                    sync_error := self._build_remove_sync_error(
+                        error,
+                        stage=stage,
+                        track_id=track_id,
+                        touched_keys=touched_keys,
+                        assume_touched_keys=[key],
+                        manifest_key=manifest_key,
+                        note_prefix=note_prefix,
+                    )
+                ) is None:
+                    raise
+                raise sync_error from error
+            touched_keys.append(key)
+
+        if entry.has_instrumental:
+            try:
+                await self._s3_client.delete_key(instrumental_key)
+            except Exception as error:
+                if (
+                    sync_error := self._build_remove_sync_error(
+                        error,
+                        stage='instrumental_delete',
+                        track_id=track_id,
+                        touched_keys=touched_keys,
+                        assume_touched_keys=[instrumental_key],
+                        manifest_key=manifest_key,
+                        note_prefix='Instrumental delete error',
+                    )
+                ) is None:
+                    raise
+                raise sync_error from error
+            touched_keys.append(instrumental_key)
+
+        if entry.has_variants:
+            original_variant_keys = self._variant_storage_keys(
+                track_group_prefix=track_group_prefix,
+                track_id=track_id,
+                variant_count=entry.preset.variant_count,
+                instrumental=False,
+            )
+            try:
+                await self._s3_client.delete_keys(original_variant_keys)
+            except Exception as error:
+                if (
+                    sync_error := self._build_remove_sync_error(
+                        error,
+                        stage='original_variant_delete',
+                        track_id=track_id,
+                        touched_keys=touched_keys,
+                        assume_touched_keys=original_variant_keys,
+                        manifest_key=manifest_key,
+                        note_prefix='Original variant delete error',
+                    )
+                ) is None:
+                    raise
+                raise sync_error from error
+            touched_keys.extend(original_variant_keys)
+
+        if entry.has_instrumental_variants:
+            instrumental_variant_keys = self._variant_storage_keys(
+                track_group_prefix=track_group_prefix,
+                track_id=track_id,
+                variant_count=entry.preset.variant_count,
+                instrumental=True,
+            )
+            try:
+                await self._s3_client.delete_keys(instrumental_variant_keys)
+            except Exception as error:
+                if (
+                    sync_error := self._build_remove_sync_error(
+                        error,
+                        stage='instrumental_variant_delete',
+                        track_id=track_id,
+                        touched_keys=touched_keys,
+                        assume_touched_keys=instrumental_variant_keys,
+                        manifest_key=manifest_key,
+                        note_prefix='Instrumental variant delete error',
+                    )
+                ) is None:
+                    raise
+                raise sync_error from error
+            touched_keys.extend(instrumental_variant_keys)
+
+        remaining_entries = [manifest_entry for manifest_entry in manifest if manifest_entry.id != track_id]
+        compacted_order_by_id: dict[TrackId, int] = {}
+        next_order = 1
+        for manifest_entry in sorted(
+            (item for item in remaining_entries if item.sub_season is entry.sub_season),
+            key=lambda item: item.order,
+        ):
+            compacted_order_by_id[manifest_entry.id] = next_order
+            next_order += 1
+
+        rewritten_manifest = Manifest(
+            [
+                dataclass_replace(manifest_entry, order=compacted_order_by_id[manifest_entry.id])
+                if manifest_entry.id in compacted_order_by_id
+                else manifest_entry
+                for manifest_entry in remaining_entries
+            ]
+        )
+
+        try:
+            await self._write_manifest_and_update_cache(
+                track_group_prefix=track_group_prefix,
+                manifest=rewritten_manifest,
+            )
+        except Exception as error:
+            if (
+                sync_error := self._build_remove_sync_error(
+                    error,
+                    stage='manifest_write',
+                    track_id=track_id,
+                    touched_keys=touched_keys,
+                    manifest_key=manifest_key,
+                    note_prefix='Remove manifest write error',
+                )
+            ) is None:
+                raise
+            raise sync_error from error
+
+    async def remove_instrumental(self, group: TrackGroup, track_id: TrackId) -> None:
+        """Remove one track's authoritative instrumental subtree.
+
+        Removal is driven strictly by the authoritative manifest entry for the
+        provided `(group, track_id)`. This method deletes only the
+        instrumental objects and variants implied by that entry and does not
+        act as a recovery path for orphaned instrumental objects or variants
+        left behind by earlier sync failures.
+
+        Raises:
+            TrackManifestCorruptedError: If the target group's manifest exists but is malformed.
+            TrackGroupNotFoundError: If the target group's manifest does not exist.
+            ValueError: If `track_id` does not exist in the provided group's manifest.
+            ValueError: If the target track has no authoritative instrumental.
+            TrackRemoveManifestSyncError: If one or more object mutations are applied but a later stage fails.
+        """
+        track_group_prefix = self._track_group_prefix(
+            universe=group.universe,
+            year=group.year,
+            season=group.season,
+        )
+        manifest = (await self._require_group_manifest(group, sub_season=None)).copy()
+        entry = self._require_manifest_entry(manifest, group=group, track_id=track_id)
+        if not entry.has_instrumental:
+            raise ValueError(f'Track id {track_id} does not have an instrumental in the provided group')
+
+        instrumental_key = self._instrumental_key(track_group_prefix, track_id)
+        manifest_key = self._manifest_key(track_group_prefix)
+        touched_keys: list[Key] = []
+
+        try:
+            await self._s3_client.delete_key(instrumental_key)
+        except Exception as error:
+            if (
+                sync_error := self._build_remove_sync_error(
+                    error,
+                    stage='instrumental_delete',
+                    track_id=track_id,
+                    touched_keys=touched_keys,
+                    assume_touched_keys=[instrumental_key],
+                    manifest_key=manifest_key,
+                    note_prefix='Instrumental delete error',
+                )
+            ) is None:
+                raise
+            raise sync_error from error
+        touched_keys.append(instrumental_key)
+
+        if entry.has_instrumental_variants:
+            instrumental_variant_keys = self._variant_storage_keys(
+                track_group_prefix=track_group_prefix,
+                track_id=track_id,
+                variant_count=entry.preset.variant_count,
+                instrumental=True,
+            )
+            try:
+                await self._s3_client.delete_keys(instrumental_variant_keys)
+            except Exception as error:
+                if (
+                    sync_error := self._build_remove_sync_error(
+                        error,
+                        stage='instrumental_variant_delete',
+                        track_id=track_id,
+                        touched_keys=touched_keys,
+                        assume_touched_keys=instrumental_variant_keys,
+                        manifest_key=manifest_key,
+                        note_prefix='Instrumental variant delete error',
+                    )
+                ) is None:
+                    raise
+                raise sync_error from error
+            touched_keys.extend(instrumental_variant_keys)
+
+        rewritten_manifest = self._replace_manifest_entry(
+            manifest,
+            updated_entry=dataclass_replace(
+                entry,
+                has_instrumental=False,
+                has_instrumental_variants=False,
+            ),
+        )
+
+        try:
+            await self._write_manifest_and_update_cache(
+                track_group_prefix=track_group_prefix,
+                manifest=rewritten_manifest,
+            )
+        except Exception as error:
+            if (
+                sync_error := self._build_remove_sync_error(
+                    error,
+                    stage='manifest_write',
+                    track_id=track_id,
+                    touched_keys=touched_keys,
+                    manifest_key=manifest_key,
+                    note_prefix='Remove instrumental manifest write error',
                 )
             ) is None:
                 raise
@@ -2012,6 +2323,33 @@ class TrackStore:
             return None
 
         sync_error = TrackUpdateManifestSyncError(
+            stage=stage,
+            track_id=track_id,
+            touched_keys=effective_keys,
+            manifest_key=manifest_key,
+        )
+        sync_error.add_note(f'{note_prefix}: {error!r}')
+        return sync_error
+
+    def _build_remove_sync_error(
+        self,
+        error: Exception,
+        *,
+        stage: str,
+        track_id: TrackId,
+        touched_keys: list[Key],
+        assume_touched_keys: Iterable[Key] | None = None,
+        manifest_key: Key,
+        note_prefix: str,
+    ) -> TrackRemoveManifestSyncError | None:
+        effective_keys = self._merge_touched_keys(
+            touched_keys=touched_keys,
+            assume_touched_keys=assume_touched_keys,
+        )
+        if not effective_keys:
+            return None
+
+        sync_error = TrackRemoveManifestSyncError(
             stage=stage,
             track_id=track_id,
             touched_keys=effective_keys,
