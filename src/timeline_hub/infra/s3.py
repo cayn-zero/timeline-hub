@@ -224,18 +224,7 @@ class S3Client:
         content_type: S3ContentType | str | None = None,
     ) -> None:
         """Store in-memory bytes as a single object."""
-        client = self._require_client()
-        kwargs: dict[str, object] = {
-            'Bucket': self._config.bucket,
-            'Key': key,
-            'Body': data,
-        }
-        if content_type is not None:
-            kwargs['ContentType'] = content_type
-        try:
-            await client.put_object(**kwargs)
-        except Exception as error:
-            raise S3PutObjectError(bucket=self._config.bucket, key=key) from error
+        await self._put_object(key, data, content_type=content_type)
 
     async def put_file(
         self,
@@ -256,18 +245,7 @@ class S3Client:
         content_type: S3ContentType | str | None = None,
     ) -> None:
         """Store data from a binary stream as a single object."""
-        client = self._require_client()
-        kwargs: dict[str, object] = {
-            'Bucket': self._config.bucket,
-            'Key': key,
-            'Body': stream,
-        }
-        if content_type is not None:
-            kwargs['ContentType'] = content_type
-        try:
-            await client.put_object(**kwargs)
-        except Exception as error:
-            raise S3PutObjectError(bucket=self._config.bucket, key=key) from error
+        await self._put_object(key, stream, content_type=content_type)
 
     async def get_bytes(self, key: Key) -> bytes:
         """Load an object into memory.
@@ -275,14 +253,7 @@ class S3Client:
         Raises:
             S3ObjectNotFoundError: If the object key does not exist.
         """
-        client = self._require_client()
-        try:
-            response = await client.get_object(Bucket=self._config.bucket, Key=key)
-        except Exception as error:
-            if self._is_not_found(error):
-                raise S3ObjectNotFoundError(key) from error
-            raise S3GetObjectError(bucket=self._config.bucket, key=key) from error
-
+        response = await self._get_object_response(key)
         async with response['Body'] as body:
             return await body.read()
 
@@ -318,14 +289,7 @@ class S3Client:
         Raises:
             S3ObjectNotFoundError: If the object key does not exist.
         """
-        client = self._require_client()
-        try:
-            response = await client.get_object(Bucket=self._config.bucket, Key=key)
-        except Exception as error:
-            if self._is_not_found(error):
-                raise S3ObjectNotFoundError(key) from error
-            raise S3GetObjectError(bucket=self._config.bucket, key=key) from error
-
+        response = await self._get_object_response(key)
         bytes_written = 0
         async with response['Body'] as body:
             while chunk := await body.read(_STREAM_READ_SIZE):
@@ -642,6 +606,35 @@ class S3Client:
             )
 
         return len(response.get('Deleted', []))
+
+    async def _put_object(
+        self,
+        key: Key,
+        body: bytes | BinaryIO,
+        *,
+        content_type: S3ContentType | str | None = None,
+    ) -> None:
+        client = self._require_client()
+        kwargs: dict[str, object] = {
+            'Bucket': self._config.bucket,
+            'Key': key,
+            'Body': body,
+        }
+        if content_type is not None:
+            kwargs['ContentType'] = content_type
+        try:
+            await client.put_object(**kwargs)
+        except Exception as error:
+            raise S3PutObjectError(bucket=self._config.bucket, key=key) from error
+
+    async def _get_object_response(self, key: Key) -> dict[str, Any]:
+        client = self._require_client()
+        try:
+            return await client.get_object(Bucket=self._config.bucket, Key=key)
+        except Exception as error:
+            if self._is_not_found(error):
+                raise S3ObjectNotFoundError(key) from error
+            raise S3GetObjectError(bucket=self._config.bucket, key=key) from error
 
     def _require_client(self) -> Any:
         if self._client is None:
