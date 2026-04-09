@@ -773,6 +773,9 @@ async def _on_store_select(
                 await handle_stale_selection(message=message, state=state)
                 return
             universe, year = selection
+            if season not in _store_season_options(year=year, today=date.today()):
+                await handle_stale_selection(message=message, state=state)
+                return
             clip_group = ClipGroup(universe=universe, year=year, season=season)
             await _show_intake_menu_or_stale(
                 show_menu=_show_store_sub_season_menu,

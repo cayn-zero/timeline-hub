@@ -1023,6 +1023,36 @@ async def test_put_and_get_stream_roundtrip(monkeypatch: pytest.MonkeyPatch) -> 
     assert out.getvalue() == b'payload'
 
 
+@pytest.mark.asyncio
+async def test_get_stream_retries_partial_target_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Client:
+        async def get_object(self, **_kwargs):
+            return {'Body': _FakeBody(b'payload')}
+
+    class _PartialWriter:
+        def __init__(self) -> None:
+            self._buffer = bytearray()
+
+        def write(self, chunk: memoryview) -> int:
+            written = min(2, len(chunk))
+            self._buffer.extend(chunk[:written])
+            return written
+
+        def getvalue(self) -> bytes:
+            return bytes(self._buffer)
+
+    monkeypatch.setattr(s3_module, 'get_session', lambda: _FakeSession(_Client()))
+
+    storage = S3Client(_config())
+    await storage.open()
+    target = _PartialWriter()
+    written = await storage.get_stream('x', target)
+    await storage.close()
+
+    assert written == 7
+    assert target.getvalue() == b'payload'
+
+
 def test_join_normalizes_segments() -> None:
     assert S3Client.join('a/', '/b', 'c') == 'a/b/c'
 

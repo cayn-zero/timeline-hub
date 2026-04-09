@@ -3738,6 +3738,57 @@ async def test_store_back_becomes_stale_when_buffer_version_changes() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['store', 'produce'])
+async def test_store_season_selection_rejects_tampered_unavailable_season(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    class _FixedDate(date):
+        @classmethod
+        def today(cls) -> '_FixedDate':
+            return cls(2026, 4, 9)
+
+    monkeypatch.setattr(intake_module, 'date', _FixedDate)
+
+    message = _fake_message(text='Select season:', chat_id=77, message_id=90)
+    callback = _fake_callback(message)
+    state = _FakeState()
+    await state.set_state(StoreClipFlow.season)
+
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(chat_id=77, message_id=1, video=_fake_video(file_id='f1', file_name='one.mp4')),
+        chat_id=77,
+    )
+    await state.update_data(
+        mode=mode,
+        menu_message_id=90,
+        year=2026,
+        universe=Universe.WEST,
+        buffer_version=buffer.version(77),
+    )
+
+    clip_store = SimpleNamespace(store=AsyncMock(), compact=AsyncMock(), fetch=AsyncMock())
+    services = _services(clip_store=clip_store, buffer=buffer)
+
+    await on_intake_menu(
+        callback,
+        IntakeCallbackData(action=MenuAction.SELECT, step=MenuStep.SEASON, value=str(int(Season.S5))),
+        AsyncMock(),
+        services,
+        _settings(),
+        state,
+    )
+
+    message.edit_text.assert_awaited_once_with('Selection is no longer available', reply_markup=None)
+    clip_store.store.assert_not_awaited()
+    clip_store.compact.assert_not_awaited()
+    clip_store.fetch.assert_not_awaited()
+    assert state.current_state is None
+    assert state.clear_count == 1
+
+
+@pytest.mark.asyncio
 async def test_reconcile_scope_selection_becomes_stale_when_buffer_version_changes() -> None:
     message = _fake_message(text='Select scope:', chat_id=77, message_id=59)
     callback = _fake_callback(message)
