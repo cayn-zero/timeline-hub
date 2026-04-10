@@ -15,6 +15,8 @@ _PRESETS_FILENAME = 'presets.json'
 _MANIFEST_FILENAME = 'manifest.json'
 _COVER_SUFFIX = '-cover'
 _INSTRUMENTAL_SUFFIX = '-instrumental'
+_AUDIO_EXTENSION = '.opus'
+_COVER_EXTENSION = '.jpg'
 
 type TrackId = str
 type PresetId = int
@@ -948,6 +950,12 @@ class TrackStore:
     Store-path reads use copy-safe manifests so writes can stage updates before
     commit, while read-path calls may reuse the cached manifest directly.
 
+    Storage format invariant:
+        Persisted audio objects are always stored as Opus with `.opus`
+        extensions in their S3 object keys. Persisted cover objects are always
+        stored as JPEG with `.jpg` extensions in their S3 object keys.
+        These extensions are part of the `TrackStore` S3 key contract.
+
     Authoritative-state invariant:
         Normal-path operations assume each group's manifest is synchronized
         with the authoritative and cache objects it governs. If staged S3
@@ -1035,14 +1043,15 @@ class TrackStore:
     ) -> None:
         """Store one original track plus its mandatory per-track cover object.
 
-        `track.audio_bytes` must already be Opus data. Cover input is strict:
-        the caller must provide exactly one of `track.cover_bytes` or
-        `track.album_id`. When `track.cover_bytes` is provided it must already
-        be JPEG data. When `track.album_id` is provided, cover bytes are copied
-        from an existing track in the same manifest whose persisted
-        `album_id` matches. The persisted `album_id` remains an opaque stable
-        linking id, not a live foreign-key reference to whichever track first
-        seeded that album family.
+        `track.audio_bytes` must already be Opus data and is persisted under a
+        `.opus` S3 key. Cover input is strict: the caller must provide exactly
+        one of `track.cover_bytes` or `track.album_id`. When
+        `track.cover_bytes` is provided it must already be JPEG data and is
+        persisted under a `.jpg` S3 key. When `track.album_id` is provided,
+        cover bytes are copied from an existing track in the same manifest
+        whose persisted `album_id` matches. The persisted `album_id` remains
+        an opaque stable linking id, not a live foreign-key reference to
+        whichever track first seeded that album family.
 
         If `preset_id` is omitted, the current default preset is used for the
         new track's initial manifest metadata. If provided, it must refer to an
@@ -1197,7 +1206,8 @@ class TrackStore:
         instrumental or replace the existing one. Cover updates are the one
         album-linked exception: `cover_bytes` fans out across all current
         manifest entries with the same `album_id`, while preserving one
-        physical cover object per track.
+        physical `.jpg` cover object per track. Any updated original or
+        instrumental audio is persisted as `.opus`.
 
         Invariant:
             All stored audio must have a sample rate of exactly 48_000 Hz.
@@ -1839,7 +1849,8 @@ class TrackStore:
         payload contains only generated variants plus shared UI metadata:
         cover bytes. The authoritative original track and optional
         authoritative instrumental objects are read only when regeneration is
-        required.
+        required. Persisted source and generated audio objects use `.opus` S3
+        keys, and per-track covers use `.jpg` S3 keys.
 
         Preset resolution is delegated to `PresetStore`. An explicit
         caller-supplied preset id is strict, while the manifest snapshot id is
@@ -2273,22 +2284,22 @@ class TrackStore:
         return S3Client.join(track_group_prefix, _MANIFEST_FILENAME)
 
     def _track_key(self, track_group_prefix: Prefix, track_id: TrackId) -> Key:
-        return S3Client.join(track_group_prefix, track_id)
+        return S3Client.join(track_group_prefix, track_id + _AUDIO_EXTENSION)
 
     def _cover_key(self, track_group_prefix: Prefix, track_id: TrackId) -> Key:
-        return S3Client.join(track_group_prefix, track_id + _COVER_SUFFIX)
+        return S3Client.join(track_group_prefix, track_id + _COVER_SUFFIX + _COVER_EXTENSION)
 
     def _instrumental_key(self, track_group_prefix: Prefix, track_id: TrackId) -> Key:
-        return S3Client.join(track_group_prefix, track_id + _INSTRUMENTAL_SUFFIX)
+        return S3Client.join(track_group_prefix, track_id + _INSTRUMENTAL_SUFFIX + _AUDIO_EXTENSION)
 
     def _variant_key(self, track_group_prefix: Prefix, track_id: TrackId, *, index: int) -> Key:
         validated_index = _expect_positive_int(index, field='index', context='variant key')
-        object_name = f'{track_id}-variant-{validated_index}'
+        object_name = f'{track_id}-variant-{validated_index}{_AUDIO_EXTENSION}'
         return S3Client.join(track_group_prefix, object_name)
 
     def _instrumental_variant_key(self, track_group_prefix: Prefix, track_id: TrackId, *, index: int) -> Key:
         validated_index = _expect_positive_int(index, field='index', context='instrumental variant key')
-        object_name = f'{track_id}-instrumental-variant-{validated_index}'
+        object_name = f'{track_id}-instrumental-variant-{validated_index}{_AUDIO_EXTENSION}'
         return S3Client.join(track_group_prefix, object_name)
 
     def _new_track_id(self, *, manifest: Manifest) -> TrackId:

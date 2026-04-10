@@ -38,6 +38,8 @@ from timeline_hub.services.track_store import (
 _UUID_1 = uuid.UUID('018f05c1-f1a3-7b34-8d29-1f53a1c9d0e1').hex
 _UUID_2 = uuid.UUID('018f05c1-f1a3-7b34-8d29-1f53a1c9d0e2').hex
 _UUID_3 = uuid.UUID('018f05c1-f1a3-7b34-8d29-1f53a1c9d0e3').hex
+_AUDIO_EXTENSION = '.opus'
+_COVER_EXTENSION = '.jpg'
 
 
 class _FakeS3Client:
@@ -111,17 +113,20 @@ def _presets_key() -> str:
 
 
 def _track_key(*, universe: TrackUniverse, year: int, season: Season, track_id: str) -> str:
-    return S3Client.join(_track_group_prefix(universe=universe, year=year, season=season), track_id)
+    return S3Client.join(_track_group_prefix(universe=universe, year=year, season=season), track_id + _AUDIO_EXTENSION)
 
 
 def _cover_key(*, universe: TrackUniverse, year: int, season: Season, track_id: str) -> str:
-    return S3Client.join(_track_group_prefix(universe=universe, year=year, season=season), track_id + '-cover')
+    return S3Client.join(
+        _track_group_prefix(universe=universe, year=year, season=season),
+        track_id + '-cover' + _COVER_EXTENSION,
+    )
 
 
 def _instrumental_key(*, universe: TrackUniverse, year: int, season: Season, track_id: str) -> str:
     return S3Client.join(
         _track_group_prefix(universe=universe, year=year, season=season),
-        track_id + '-instrumental',
+        track_id + '-instrumental' + _AUDIO_EXTENSION,
     )
 
 
@@ -900,11 +905,11 @@ def test_variant_key_uses_ordered_variant_index() -> None:
 
     assert store._variant_key(group_prefix, _UUID_1, index=1) == S3Client.join(
         group_prefix,
-        _UUID_1 + '-variant-1',
+        _UUID_1 + '-variant-1' + _AUDIO_EXTENSION,
     )
     assert store._variant_key(group_prefix, _UUID_1, index=2) == S3Client.join(
         group_prefix,
-        _UUID_1 + '-variant-2',
+        _UUID_1 + '-variant-2' + _AUDIO_EXTENSION,
     )
 
 
@@ -914,32 +919,38 @@ def test_instrumental_variant_key_uses_ordered_variant_index() -> None:
 
     assert store._instrumental_variant_key(group_prefix, _UUID_1, index=1) == S3Client.join(
         group_prefix,
-        _UUID_1 + '-instrumental-variant-1',
+        _UUID_1 + '-instrumental-variant-1' + _AUDIO_EXTENSION,
     )
     assert store._instrumental_variant_key(group_prefix, _UUID_1, index=2) == S3Client.join(
         group_prefix,
-        _UUID_1 + '-instrumental-variant-2',
+        _UUID_1 + '-instrumental-variant-2' + _AUDIO_EXTENSION,
     )
 
 
-def test_track_key_uses_bare_track_id_without_track_suffix() -> None:
+def test_track_key_uses_opus_extension_without_track_suffix() -> None:
     store = _store(_FakeS3Client())
     group_prefix = _track_group_prefix(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
 
-    assert store._track_key(group_prefix, _UUID_1) == S3Client.join(group_prefix, _UUID_1)
+    assert store._track_key(group_prefix, _UUID_1) == S3Client.join(group_prefix, _UUID_1 + _AUDIO_EXTENSION)
     assert not store._track_key(group_prefix, _UUID_1).endswith('-track')
 
 
-def test_attached_and_variant_keys_are_extensionless_and_distinguishable() -> None:
+def test_attached_and_variant_keys_include_storage_extensions() -> None:
     store = _store(_FakeS3Client())
     group_prefix = _track_group_prefix(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
 
-    assert store._cover_key(group_prefix, _UUID_1) == S3Client.join(group_prefix, _UUID_1 + '-cover')
-    assert store._instrumental_key(group_prefix, _UUID_1) == S3Client.join(group_prefix, _UUID_1 + '-instrumental')
-    assert store._variant_key(group_prefix, _UUID_1, index=1) == S3Client.join(group_prefix, _UUID_1 + '-variant-1')
+    assert store._cover_key(group_prefix, _UUID_1) == S3Client.join(group_prefix, _UUID_1 + '-cover' + _COVER_EXTENSION)
+    assert store._instrumental_key(group_prefix, _UUID_1) == S3Client.join(
+        group_prefix,
+        _UUID_1 + '-instrumental' + _AUDIO_EXTENSION,
+    )
+    assert store._variant_key(group_prefix, _UUID_1, index=1) == S3Client.join(
+        group_prefix,
+        _UUID_1 + '-variant-1' + _AUDIO_EXTENSION,
+    )
     assert store._instrumental_variant_key(group_prefix, _UUID_1, index=1) == S3Client.join(
         group_prefix,
-        _UUID_1 + '-instrumental-variant-1',
+        _UUID_1 + '-instrumental-variant-1' + _AUDIO_EXTENSION,
     )
 
 
