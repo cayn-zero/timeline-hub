@@ -383,6 +383,28 @@ def test_extension_from_string_rejects_unknown_value() -> None:
         Extension.from_string('png')
 
 
+@pytest.mark.parametrize(
+    ('filename', 'expected'),
+    [
+        ('track.opus', Extension.OPUS),
+        ('TRACK.OPUS', Extension.OPUS),
+        ('cover.jpg', Extension.JPG),
+        ('cover.JPG', Extension.JPG),
+    ],
+)
+def test_extension_from_filename_normalizes_supported_values(filename: str, expected: Extension) -> None:
+    assert Extension.from_filename(filename) is expected
+
+
+@pytest.mark.parametrize(
+    'filename',
+    [123, '', 'track', 'track.', 'archive.tar.gz'],
+)
+def test_extension_from_filename_rejects_invalid_values(filename: object) -> None:
+    with pytest.raises(InvalidExtensionError):
+        Extension.from_filename(filename)  # type: ignore[arg-type]
+
+
 def test_extension_suffix_matches_storage_suffix() -> None:
     assert Extension.OPUS.suffix == '.opus'
     assert Extension.JPG.suffix == '.jpg'

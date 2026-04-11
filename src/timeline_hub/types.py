@@ -32,6 +32,20 @@ class Extension(StrEnum):
         except ValueError as error:
             raise InvalidExtensionError(f'Unsupported extension: {value}') from error
 
+    @classmethod
+    def from_filename(cls, filename: str) -> Self:
+        """Extract and normalize the final extension segment from a filename."""
+        if not isinstance(filename, str):
+            raise InvalidExtensionError('filename must be a string')
+        if not filename:
+            raise InvalidExtensionError('filename must not be empty')
+
+        stem, dot, suffix = filename.rpartition('.')
+        if not dot or not suffix:
+            raise InvalidExtensionError(f'Unsupported extension: {filename}')
+
+        return cls.from_string(suffix)
+
 
 @dataclass(frozen=True, slots=True)
 class FileBytes:
