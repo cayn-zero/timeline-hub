@@ -8,11 +8,8 @@ import timeline_hub.services.track_store as track_store_module
 from timeline_hub.infra.s3 import S3Client, S3ObjectNotFoundError
 from timeline_hub.services.track_store import (
     AppliedPreset,
-    Extension,
     FetchedVariant,
     FetchedVariants,
-    FileBytes,
-    InvalidExtensionError,
     Manifest,
     ManifestEntry,
     Preset,
@@ -37,6 +34,7 @@ from timeline_hub.services.track_store import (
     TrackUniverse,
     TrackUpdateManifestSyncError,
 )
+from timeline_hub.types import Extension, FileBytes, InvalidExtensionError
 
 _UUID_1 = uuid.UUID('018f05c1-f1a3-7b34-8d29-1f53a1c9d0e1').hex
 _UUID_2 = uuid.UUID('018f05c1-f1a3-7b34-8d29-1f53a1c9d0e2').hex
