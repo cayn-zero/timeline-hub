@@ -8,8 +8,11 @@ import timeline_hub.services.track_store as track_store_module
 from timeline_hub.infra.s3 import S3Client, S3ObjectNotFoundError
 from timeline_hub.services.track_store import (
     AppliedPreset,
+    Extension,
     FetchedVariant,
     FetchedVariants,
+    FileBytes,
+    InvalidExtensionError,
     Manifest,
     ManifestEntry,
     Preset,
@@ -38,8 +41,6 @@ from timeline_hub.services.track_store import (
 _UUID_1 = uuid.UUID('018f05c1-f1a3-7b34-8d29-1f53a1c9d0e1').hex
 _UUID_2 = uuid.UUID('018f05c1-f1a3-7b34-8d29-1f53a1c9d0e2').hex
 _UUID_3 = uuid.UUID('018f05c1-f1a3-7b34-8d29-1f53a1c9d0e3').hex
-_AUDIO_EXTENSION = '.opus'
-_COVER_EXTENSION = '.jpg'
 
 
 class _FakeS3Client:
@@ -113,20 +114,23 @@ def _presets_key() -> str:
 
 
 def _track_key(*, universe: TrackUniverse, year: int, season: Season, track_id: str) -> str:
-    return S3Client.join(_track_group_prefix(universe=universe, year=year, season=season), track_id + _AUDIO_EXTENSION)
+    return S3Client.join(
+        _track_group_prefix(universe=universe, year=year, season=season),
+        track_id + Extension.OPUS.suffix,
+    )
 
 
 def _cover_key(*, universe: TrackUniverse, year: int, season: Season, track_id: str) -> str:
     return S3Client.join(
         _track_group_prefix(universe=universe, year=year, season=season),
-        track_id + '-cover' + _COVER_EXTENSION,
+        track_id + '-cover' + Extension.JPG.suffix,
     )
 
 
 def _instrumental_key(*, universe: TrackUniverse, year: int, season: Season, track_id: str) -> str:
     return S3Client.join(
         _track_group_prefix(universe=universe, year=year, season=season),
-        track_id + '-instrumental' + _AUDIO_EXTENSION,
+        track_id + '-instrumental' + Extension.OPUS.suffix,
     )
 
 
@@ -315,8 +319,8 @@ def _track(
     return Track(
         artists=artists,
         title=title,
-        audio_bytes=audio_bytes,
-        cover_bytes=cover_bytes,
+        audio=FileBytes(data=audio_bytes, extension=Extension.OPUS),
+        cover=None if cover_bytes is None else FileBytes(data=cover_bytes, extension=Extension.JPG),
         album_id=album_id,
     )
 
@@ -370,6 +374,27 @@ def test_preset_rejects_missing_all_variant_modes() -> None:
         )
 
 
+def test_extension_from_string_normalizes_supported_values() -> None:
+    assert Extension.from_string('opus') is Extension.OPUS
+    assert Extension.from_string('.opus') is Extension.OPUS
+    assert Extension.from_string('OPUS') is Extension.OPUS
+
+
+def test_extension_from_string_rejects_unknown_value() -> None:
+    with pytest.raises(InvalidExtensionError, match='Unsupported extension: png'):
+        Extension.from_string('png')
+
+
+def test_extension_suffix_matches_storage_suffix() -> None:
+    assert Extension.OPUS.suffix == '.opus'
+    assert Extension.JPG.suffix == '.jpg'
+
+
+def test_file_bytes_rejects_empty_data() -> None:
+    with pytest.raises(ValueError, match='FileBytes.data must not be empty'):
+        FileBytes(data=b'', extension=Extension.OPUS)
+
+
 @pytest.mark.parametrize(
     ('kwargs', 'message'),
     [
@@ -379,17 +404,17 @@ def test_preset_rejects_missing_all_variant_modes() -> None:
         ({'artists': ('artist', '   ')}, 'Track.artists entries must be non-empty strings'),
         ({'title': 1}, 'Track.title must be a string'),
         ({'title': '   '}, 'Track.title must be a non-empty string'),
-        ({'audio_bytes': 'track'}, 'Track.audio_bytes must be bytes'),
-        ({'audio_bytes': b''}, 'Track.audio_bytes must not be empty'),
-        ({'cover_bytes': None, 'album_id': None}, 'Track requires exactly one of cover_bytes or album_id'),
+        ({'audio': 'track'}, 'Track.audio must be FileBytes'),
+        ({'audio': FileBytes(data=b'track', extension=Extension.JPG)}, 'Track.audio must use Extension.OPUS'),
+        ({'cover': None, 'album_id': None}, 'Track requires exactly one of cover or album_id'),
         (
-            {'cover_bytes': b'cover', 'album_id': _UUID_1},
-            'Track requires exactly one of cover_bytes or album_id',
+            {'cover': FileBytes(data=b'cover', extension=Extension.JPG), 'album_id': _UUID_1},
+            'Track requires exactly one of cover or album_id',
         ),
-        ({'cover_bytes': 'cover'}, 'Track.cover_bytes must be bytes'),
-        ({'cover_bytes': b''}, 'Track.cover_bytes must not be empty'),
-        ({'cover_bytes': None, 'album_id': 1}, 'Track.album_id must be a string'),
-        ({'cover_bytes': None, 'album_id': '   '}, 'Track.album_id must be a non-empty string'),
+        ({'cover': 'cover'}, 'Track.cover must be FileBytes'),
+        ({'cover': FileBytes(data=b'cover', extension=Extension.OPUS)}, 'Track.cover must use Extension.JPG'),
+        ({'cover': None, 'album_id': 1}, 'Track.album_id must be a string'),
+        ({'cover': None, 'album_id': '   '}, 'Track.album_id must be a non-empty string'),
     ],
 )
 def test_track_rejects_invalid_fields(kwargs: dict[str, object], message: str) -> None:
@@ -397,8 +422,8 @@ def test_track_rejects_invalid_fields(kwargs: dict[str, object], message: str) -
         Track(
             artists=kwargs.get('artists', ('artist',)),
             title=kwargs.get('title', 'title'),
-            audio_bytes=kwargs.get('audio_bytes', b'track'),
-            cover_bytes=kwargs.get('cover_bytes', b'cover'),
+            audio=kwargs.get('audio', FileBytes(data=b'track', extension=Extension.OPUS)),
+            cover=kwargs.get('cover', FileBytes(data=b'cover', extension=Extension.JPG)),
             album_id=kwargs.get('album_id'),
         )
 
@@ -905,11 +930,11 @@ def test_variant_key_uses_ordered_variant_index() -> None:
 
     assert store._variant_key(group_prefix, _UUID_1, index=1) == S3Client.join(
         group_prefix,
-        _UUID_1 + '-variant-1' + _AUDIO_EXTENSION,
+        _UUID_1 + '-variant-1' + Extension.OPUS.suffix,
     )
     assert store._variant_key(group_prefix, _UUID_1, index=2) == S3Client.join(
         group_prefix,
-        _UUID_1 + '-variant-2' + _AUDIO_EXTENSION,
+        _UUID_1 + '-variant-2' + Extension.OPUS.suffix,
     )
 
 
@@ -919,11 +944,11 @@ def test_instrumental_variant_key_uses_ordered_variant_index() -> None:
 
     assert store._instrumental_variant_key(group_prefix, _UUID_1, index=1) == S3Client.join(
         group_prefix,
-        _UUID_1 + '-instrumental-variant-1' + _AUDIO_EXTENSION,
+        _UUID_1 + '-instrumental-variant-1' + Extension.OPUS.suffix,
     )
     assert store._instrumental_variant_key(group_prefix, _UUID_1, index=2) == S3Client.join(
         group_prefix,
-        _UUID_1 + '-instrumental-variant-2' + _AUDIO_EXTENSION,
+        _UUID_1 + '-instrumental-variant-2' + Extension.OPUS.suffix,
     )
 
 
@@ -931,7 +956,7 @@ def test_track_key_uses_opus_extension_without_track_suffix() -> None:
     store = _store(_FakeS3Client())
     group_prefix = _track_group_prefix(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
 
-    assert store._track_key(group_prefix, _UUID_1) == S3Client.join(group_prefix, _UUID_1 + _AUDIO_EXTENSION)
+    assert store._track_key(group_prefix, _UUID_1) == S3Client.join(group_prefix, _UUID_1 + Extension.OPUS.suffix)
     assert not store._track_key(group_prefix, _UUID_1).endswith('-track')
 
 
@@ -939,18 +964,21 @@ def test_attached_and_variant_keys_include_storage_extensions() -> None:
     store = _store(_FakeS3Client())
     group_prefix = _track_group_prefix(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
 
-    assert store._cover_key(group_prefix, _UUID_1) == S3Client.join(group_prefix, _UUID_1 + '-cover' + _COVER_EXTENSION)
+    assert store._cover_key(group_prefix, _UUID_1) == S3Client.join(
+        group_prefix,
+        _UUID_1 + '-cover' + Extension.JPG.suffix,
+    )
     assert store._instrumental_key(group_prefix, _UUID_1) == S3Client.join(
         group_prefix,
-        _UUID_1 + '-instrumental' + _AUDIO_EXTENSION,
+        _UUID_1 + '-instrumental' + Extension.OPUS.suffix,
     )
     assert store._variant_key(group_prefix, _UUID_1, index=1) == S3Client.join(
         group_prefix,
-        _UUID_1 + '-variant-1' + _AUDIO_EXTENSION,
+        _UUID_1 + '-variant-1' + Extension.OPUS.suffix,
     )
     assert store._instrumental_variant_key(group_prefix, _UUID_1, index=1) == S3Client.join(
         group_prefix,
-        _UUID_1 + '-instrumental-variant-1' + _AUDIO_EXTENSION,
+        _UUID_1 + '-instrumental-variant-1' + Extension.OPUS.suffix,
     )
 
 
@@ -3500,25 +3528,28 @@ async def test_fetch_with_explicit_preset_returns_current_original_and_instrumen
     assert result.track_id == _UUID_1
     assert result.artists == ('artist', 'featured')
     assert result.title == 'title'
-    assert result.cover_bytes == b'cover-bytes'
+    assert result.cover.data == b'cover-bytes'
+    assert result.cover.extension is Extension.JPG
     assert not hasattr(result, 'cover_filename')
     assert isinstance(result.variants[0], FetchedVariant)
     assert [variant.speed for variant in result.variants] == sorted(variant.speed for variant in result.variants)
-    assert [variant.audio_bytes for variant in result.variants] == [
+    assert [variant.audio.data for variant in result.variants] == [
         b'orig|1',
         b'orig|2',
         b'orig|3',
         b'orig|4',
         b'orig|5',
     ]
+    assert all(variant.audio.extension is Extension.OPUS for variant in result.variants)
     assert result.instrumental_variants is not None
-    assert [variant.audio_bytes for variant in result.instrumental_variants] == [
+    assert [variant.audio.data for variant in result.instrumental_variants] == [
         b'inst|1',
         b'inst|2',
         b'inst|3',
         b'inst|4',
         b'inst|5',
     ]
+    assert all(variant.audio.extension is Extension.OPUS for variant in result.instrumental_variants)
     assert (
         _track_key(universe=group.universe, year=group.year, season=group.season, track_id=_UUID_1)
         not in s3_client.get_calls
@@ -3573,7 +3604,8 @@ async def test_fetch_reads_cover_from_selected_track_key_even_with_shared_album_
 
     result = await store.fetch(group, _UUID_2, preset_id=resolved.id)
 
-    assert result.cover_bytes == b'cover-two'
+    assert result.cover.data == b'cover-two'
+    assert result.cover.extension is Extension.JPG
     assert cover_key_2 in s3_client.get_calls
     assert cover_key_1 not in s3_client.get_calls
 
@@ -3769,13 +3801,14 @@ async def test_fetch_regenerates_original_variants_when_preset_id_mismatches(mon
     )
     assert s3_client.delete_keys_calls == [previous_keys]
     assert generation_calls
-    assert [variant.audio_bytes for variant in result.variants] == [
+    assert [variant.audio.data for variant in result.variants] == [
         b'authoritative-track|0.82|0.03',
         b'authoritative-track|0.88|0.02',
         b'authoritative-track|0.94|0.01',
         b'authoritative-track|1.06|0.01',
         b'authoritative-track|1.12|0.02',
     ]
+    assert all(variant.audio.extension is Extension.OPUS for variant in result.variants)
     rewritten_manifest = json.loads(s3_client.objects[manifest_key].decode('utf-8'))
     assert rewritten_manifest['data'][0]['preset'] == _applied_preset_dict(
         _applied_preset(preset_id=1, version=3, preset=_sample_stored_presets()[0].preset)

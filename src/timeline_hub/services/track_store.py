@@ -15,11 +15,36 @@ _PRESETS_FILENAME = 'presets.json'
 _MANIFEST_FILENAME = 'manifest.json'
 _COVER_SUFFIX = '-cover'
 _INSTRUMENTAL_SUFFIX = '-instrumental'
-_AUDIO_EXTENSION = '.opus'
-_COVER_EXTENSION = '.jpg'
 
 type TrackId = str
 type PresetId = int
+
+
+class InvalidExtensionError(ValueError):
+    """Raised when an unsupported or malformed file extension is provided."""
+
+
+class Extension(StrEnum):
+    """Supported media-file extensions at `TrackStore` boundaries."""
+
+    OPUS = 'opus'
+    JPG = 'jpg'
+
+    @property
+    def suffix(self) -> str:
+        return f'.{self.value}'
+
+    @classmethod
+    def from_string(cls, value: str) -> Self:
+        """Normalize a supported extension string into its canonical enum."""
+        if not isinstance(value, str):
+            raise InvalidExtensionError('extension value must be a string')
+
+        normalized = value.lstrip('.')
+        try:
+            return cls(normalized.lower())
+        except ValueError as error:
+            raise InvalidExtensionError(f'Unsupported extension: {value}') from error
 
 
 class Season(IntEnum):
@@ -80,13 +105,30 @@ class TrackGroup:
 
 
 @dataclass(frozen=True, slots=True)
+class FileBytes:
+    """Binary payload paired with its required extension contract."""
+
+    data: bytes
+    extension: Extension
+
+    def __post_init__(self) -> None:
+        """Validate explicit media payload invariants for all construction paths."""
+        if not isinstance(self.data, bytes):
+            raise ValueError('FileBytes.data must be bytes')
+        if not self.data:
+            raise ValueError('FileBytes.data must not be empty')
+        if not isinstance(self.extension, Extension):
+            raise ValueError('FileBytes.extension must be an Extension')
+
+
+@dataclass(frozen=True, slots=True)
 class Track:
-    """Original track payload for storage."""
+    """Original track payload for storage with required explicit extensions."""
 
     artists: tuple[str, ...]
     title: str
-    audio_bytes: bytes
-    cover_bytes: bytes | None = None
+    audio: FileBytes
+    cover: FileBytes | None = None
     album_id: TrackId | None = None
 
     def __post_init__(self) -> None:
@@ -105,21 +147,21 @@ class Track:
         if not self.title.strip():
             raise ValueError('Track.title must be a non-empty string')
 
-        if not isinstance(self.audio_bytes, bytes):
-            raise ValueError('Track.audio_bytes must be bytes')
-        if not self.audio_bytes:
-            raise ValueError('Track.audio_bytes must not be empty')
+        if not isinstance(self.audio, FileBytes):
+            raise ValueError('Track.audio must be FileBytes')
+        if self.audio.extension is not Extension.OPUS:
+            raise ValueError('Track.audio must use Extension.OPUS')
 
-        has_cover_bytes = self.cover_bytes is not None
+        has_cover = self.cover is not None
         has_album_id = self.album_id is not None
-        if has_cover_bytes == has_album_id:
-            raise ValueError('Track requires exactly one of cover_bytes or album_id')
+        if has_cover == has_album_id:
+            raise ValueError('Track requires exactly one of cover or album_id')
 
-        if has_cover_bytes:
-            if not isinstance(self.cover_bytes, bytes):
-                raise ValueError('Track.cover_bytes must be bytes')
-            if not self.cover_bytes:
-                raise ValueError('Track.cover_bytes must not be empty')
+        if has_cover:
+            if not isinstance(self.cover, FileBytes):
+                raise ValueError('Track.cover must be FileBytes')
+            if self.cover.extension is not Extension.JPG:
+                raise ValueError('Track.cover must use Extension.JPG')
 
         if has_album_id:
             if not isinstance(self.album_id, str):
@@ -140,21 +182,21 @@ class TrackInfo:
 
 @dataclass(frozen=True, slots=True)
 class FetchedVariant:
-    """One generated playable track variant returned by `fetch()`."""
+    """One generated playable track variant returned by `fetch()` as Opus `FileBytes`."""
 
     speed: float
     reverb: float
-    audio_bytes: bytes
+    audio: FileBytes
 
 
 @dataclass(frozen=True, slots=True)
 class FetchedVariants:
-    """Immutable UI read model for one track's generated variants and shared metadata."""
+    """Immutable UI read model whose returned `FileBytes` use fixed Opus/JPG extensions."""
 
     track_id: TrackId
     artists: tuple[str, ...]
     title: str
-    cover_bytes: bytes
+    cover: FileBytes
     variants: tuple[FetchedVariant, ...]
     instrumental_variants: tuple[FetchedVariant, ...] | None
 
@@ -954,7 +996,9 @@ class TrackStore:
         Persisted audio objects are always stored as Opus with `.opus`
         extensions in their S3 object keys. Persisted cover objects are always
         stored as JPEG with `.jpg` extensions in their S3 object keys.
-        These extensions are part of the `TrackStore` S3 key contract.
+        These extensions are part of the `TrackStore` S3 key contract, while
+        the public API uses `FileBytes` so returned and accepted media always
+        carries an explicit `Extension`.
 
     Authoritative-state invariant:
         Normal-path operations assume each group's manifest is synchronized
@@ -1043,11 +1087,11 @@ class TrackStore:
     ) -> None:
         """Store one original track plus its mandatory per-track cover object.
 
-        `track.audio_bytes` must already be Opus data and is persisted under a
+        `track.audio` must be Opus `FileBytes` and is persisted under a
         `.opus` S3 key. Cover input is strict: the caller must provide exactly
-        one of `track.cover_bytes` or `track.album_id`. When
-        `track.cover_bytes` is provided it must already be JPEG data and is
-        persisted under a `.jpg` S3 key. When `track.album_id` is provided,
+        one of `track.cover` or `track.album_id`. When `track.cover` is
+        provided it must be JPEG `FileBytes` and is persisted under a `.jpg`
+        S3 key. When `track.album_id` is provided,
         cover bytes are copied from an existing track in the same manifest
         whose persisted `album_id` matches. The persisted `album_id` remains
         an opaque stable linking id, not a live foreign-key reference to
@@ -1091,10 +1135,16 @@ class TrackStore:
             TrackPresetsCorruptedError: If `tracks/presets.json` exists but is malformed.
             TrackManifestCorruptedError: If the target group's manifest exists but is malformed.
             ValueError: If `preset_id` is provided but does not refer to a known preset.
-            TrackInvalidAudioFormatError: If `track.audio_bytes` is not 48_000 Hz audio.
+            TrackInvalidAudioFormatError: If `track.audio` is not 48_000 Hz audio.
             TrackManifestSyncError: If one or more track-store objects are written but a later stage fails.
         """
-        sample_rate = await probe_audio_sample_rate(track.audio_bytes)
+        if track.audio.extension is not Extension.OPUS:
+            raise ValueError('Track.audio must use Extension.OPUS')
+        if track.cover is not None:
+            if track.cover.extension is not Extension.JPG:
+                raise ValueError('Track.cover must use Extension.JPG')
+
+        sample_rate = await probe_audio_sample_rate(track.audio.data)
         if sample_rate != 48_000:
             raise TrackInvalidAudioFormatError(f'Audio sample rate must be 48000 Hz, got {sample_rate}')
 
@@ -1113,11 +1163,12 @@ class TrackStore:
         track_id = self._new_track_id(manifest=manifest)
         order = manifest.next_order(sub_season=sub_season)
 
-        if track.cover_bytes is not None:
-            cover_bytes = track.cover_bytes
+        if track.cover is not None:
+            cover_bytes = track.cover.data
             album_id = track_id
         else:
-            assert track.album_id is not None
+            if track.album_id is None:
+                raise ValueError('Track.album_id must be provided')
             album_entry = self._find_album_entry(manifest, album_id=track.album_id)
             if album_entry is None:
                 raise ValueError(
@@ -1152,7 +1203,7 @@ class TrackStore:
 
         await self._s3_client.put_bytes(
             track_key,
-            track.audio_bytes,
+            track.audio.data,
             content_type=S3ContentType.OPUS,
         )
 
@@ -1847,10 +1898,11 @@ class TrackStore:
 
         The selected track is identified by `(group, track_id)`. The returned
         payload contains only generated variants plus shared UI metadata:
-        cover bytes. The authoritative original track and optional
+        cover `FileBytes`. The authoritative original track and optional
         authoritative instrumental objects are read only when regeneration is
         required. Persisted source and generated audio objects use `.opus` S3
-        keys, and per-track covers use `.jpg` S3 keys.
+        keys, and per-track covers use `.jpg` S3 keys. Returned audio always
+        uses `Extension.OPUS`, and returned covers always use `Extension.JPG`.
 
         Preset resolution is delegated to `PresetStore`. An explicit
         caller-supplied preset id is strict, while the manifest snapshot id is
@@ -2128,7 +2180,7 @@ class TrackStore:
             track_id=entry.id,
             artists=entry.artists,
             title=entry.title,
-            cover_bytes=cover_bytes,
+            cover=FileBytes(data=cover_bytes, extension=Extension.JPG),
             variants=variants,
             instrumental_variants=instrumental_variants,
         )
@@ -2284,22 +2336,22 @@ class TrackStore:
         return S3Client.join(track_group_prefix, _MANIFEST_FILENAME)
 
     def _track_key(self, track_group_prefix: Prefix, track_id: TrackId) -> Key:
-        return S3Client.join(track_group_prefix, track_id + _AUDIO_EXTENSION)
+        return S3Client.join(track_group_prefix, track_id + Extension.OPUS.suffix)
 
     def _cover_key(self, track_group_prefix: Prefix, track_id: TrackId) -> Key:
-        return S3Client.join(track_group_prefix, track_id + _COVER_SUFFIX + _COVER_EXTENSION)
+        return S3Client.join(track_group_prefix, track_id + _COVER_SUFFIX + Extension.JPG.suffix)
 
     def _instrumental_key(self, track_group_prefix: Prefix, track_id: TrackId) -> Key:
-        return S3Client.join(track_group_prefix, track_id + _INSTRUMENTAL_SUFFIX + _AUDIO_EXTENSION)
+        return S3Client.join(track_group_prefix, track_id + _INSTRUMENTAL_SUFFIX + Extension.OPUS.suffix)
 
     def _variant_key(self, track_group_prefix: Prefix, track_id: TrackId, *, index: int) -> Key:
         validated_index = _expect_positive_int(index, field='index', context='variant key')
-        object_name = f'{track_id}-variant-{validated_index}{_AUDIO_EXTENSION}'
+        object_name = f'{track_id}-variant-{validated_index}{Extension.OPUS.suffix}'
         return S3Client.join(track_group_prefix, object_name)
 
     def _instrumental_variant_key(self, track_group_prefix: Prefix, track_id: TrackId, *, index: int) -> Key:
         validated_index = _expect_positive_int(index, field='index', context='instrumental variant key')
-        object_name = f'{track_id}-instrumental-variant-{validated_index}{_AUDIO_EXTENSION}'
+        object_name = f'{track_id}-instrumental-variant-{validated_index}{Extension.OPUS.suffix}'
         return S3Client.join(track_group_prefix, object_name)
 
     def _new_track_id(self, *, manifest: Manifest) -> TrackId:
@@ -2396,7 +2448,7 @@ class TrackStore:
                 FetchedVariant(
                     speed=spec.speed,
                     reverb=spec.reverb,
-                    audio_bytes=variant_bytes,
+                    audio=FileBytes(data=variant_bytes, extension=Extension.OPUS),
                 )
             )
 
@@ -2436,7 +2488,7 @@ class TrackStore:
                 FetchedVariant(
                     speed=spec.speed,
                     reverb=spec.reverb,
-                    audio_bytes=generated_bytes,
+                    audio=FileBytes(data=generated_bytes, extension=Extension.OPUS),
                 )
             )
 
