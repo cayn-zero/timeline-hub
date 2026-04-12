@@ -537,10 +537,10 @@ class ClipStore:
 
     async def store(
         self,
-        clips: Sequence[FileBytes],
-        *,
         group: ClipGroup,
         sub_group: ClipSubGroup,
+        *,
+        clips: Sequence[FileBytes],
     ) -> StoreResult:
         """Store one logical clip batch with clip-group-local deduplication.
 

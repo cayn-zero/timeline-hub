@@ -1046,8 +1046,8 @@ class TrackStore:
         self,
         group: TrackGroup,
         sub_season: SubSeason,
-        track: Track,
         *,
+        track: Track,
         preset_id: PresetId | None = None,
     ) -> None:
         """Store one original track plus its mandatory per-track cover object.
@@ -1448,7 +1448,7 @@ class TrackStore:
                 raise
             raise sync_error from error
 
-    async def reorder(self, group: TrackGroup, track_ids: Sequence[TrackId]) -> None:
+    async def reorder(self, group: TrackGroup, *, track_ids: Sequence[TrackId]) -> None:
         """Rewrite the authoritative order for exactly one existing sub-season.
 
         This is a pure ordering operation within a single sub-season already
@@ -1511,8 +1511,8 @@ class TrackStore:
     async def move(
         self,
         group: TrackGroup,
-        track_ids: Sequence[TrackId],
         *,
+        track_ids: Sequence[TrackId],
         target_sub_season: SubSeason,
     ) -> None:
         """Relocate tracks across sub-seasons without mutating any S3 objects.

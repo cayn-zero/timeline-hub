@@ -1433,9 +1433,9 @@ async def test_store_treats_existing_video_hash_as_duplicate(monkeypatch: pytest
     store = ClipStore(s3_client)
 
     result = await store.store(
-        [_mp4_file(b'clip')],
-        group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-        sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+        ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+        ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+        clips=[_mp4_file(b'clip')],
     )
 
     assert result.stored_count == 0
@@ -1449,9 +1449,9 @@ async def test_store_rejects_non_mp4_filebytes() -> None:
 
     with pytest.raises(InvalidExtensionError, match='clips entries must use Extension.MP4'):
         await store.store(
-            [FileBytes(data=b'clip', extension=Extension.JPG)],
-            group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-            sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+            ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+            ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+            clips=[FileBytes(data=b'clip', extension=Extension.JPG)],
         )
 
 
@@ -1466,12 +1466,12 @@ async def test_store_generates_new_ids_for_same_call_distinct_hashes(
     store = ClipStore(s3_client)
 
     result = await store.store(
-        [
+        ClipGroup(universe=Universe.EAST, year=2024, season=Season.S1),
+        ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+        clips=[
             _mp4_file(b'first'),
             _mp4_file(b'second'),
         ],
-        group=ClipGroup(universe=Universe.EAST, year=2024, season=Season.S1),
-        sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
     )
 
     assert result.stored_count == 2
@@ -1510,13 +1510,13 @@ async def test_store_deduplicates_same_call_by_video_hash_and_keeps_dense_order(
     store = ClipStore(s3_client)
 
     result = await store.store(
-        [
+        ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+        ClipSubGroup(sub_season=SubSeason.C, scope=Scope.SOURCE),
+        clips=[
             _mp4_file(b'first'),
             _mp4_file(b'second'),
             _mp4_file(b'third'),
         ],
-        group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-        sub_group=ClipSubGroup(sub_season=SubSeason.C, scope=Scope.SOURCE),
     )
 
     assert result == StoreResult(
@@ -1564,17 +1564,17 @@ async def test_store_creates_new_batch_per_call_and_resets_order(monkeypatch: py
     clip_sub_group = ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION)
 
     first_result = await store.store(
-        [
+        clip_group,
+        clip_sub_group,
+        clips=[
             _mp4_file(b'first'),
             _mp4_file(b'second'),
         ],
-        group=clip_group,
-        sub_group=clip_sub_group,
     )
     second_result = await store.store(
-        [_mp4_file(b'third')],
-        group=clip_group,
-        sub_group=clip_sub_group,
+        clip_group,
+        clip_sub_group,
+        clips=[_mp4_file(b'third')],
     )
 
     assert first_result == StoreResult(
@@ -1635,9 +1635,9 @@ async def test_store_all_duplicates_do_not_create_new_batch(monkeypatch: pytest.
     store = ClipStore(s3_client)
 
     result = await store.store(
-        [_mp4_file(b'clip')],
-        group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
-        sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+        ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+        ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+        clips=[_mp4_file(b'clip')],
     )
 
     assert result == StoreResult(stored_count=0, duplicate_count=1)
@@ -1678,9 +1678,9 @@ async def test_store_propagates_first_clip_upload_failure_without_sync_error(
 
     with pytest.raises(RuntimeError, match=f'boom putting {clip_key}'):
         await store.store(
-            [_mp4_file(b'clip')],
-            group=clip_group,
-            sub_group=clip_sub_group,
+            clip_group,
+            clip_sub_group,
+            clips=[_mp4_file(b'clip')],
         )
 
     assert manifest_key not in [call[0] for call in s3_client.put_calls]
@@ -1723,12 +1723,12 @@ async def test_store_raises_sync_error_when_later_clip_upload_fails(
 
     with pytest.raises(ClipManifestSyncError, match='Staged clip store failed at clip_upload') as excinfo:
         await store.store(
-            [
+            clip_group,
+            clip_sub_group,
+            clips=[
                 _mp4_file(b'first'),
                 _mp4_file(b'second'),
             ],
-            group=clip_group,
-            sub_group=clip_sub_group,
         )
 
     assert excinfo.value.stage == 'clip_upload'
@@ -1781,12 +1781,12 @@ async def test_store_raises_sync_error_when_manifest_write_fails(
 
     with pytest.raises(ClipManifestSyncError, match='Staged clip store failed at manifest_write') as excinfo:
         await store.store(
-            [
+            clip_group,
+            clip_sub_group,
+            clips=[
                 _mp4_file(b'first'),
                 _mp4_file(b'second'),
             ],
-            group=clip_group,
-            sub_group=clip_sub_group,
         )
 
     assert excinfo.value.stage == 'manifest_write'
@@ -2502,14 +2502,14 @@ async def test_compact_can_pull_newly_stored_single_clip_into_previous_batch_whe
     clip_sub_group = ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.EXTRA)
 
     await store.store(
-        [_mp4_file(b'first')],
-        group=clip_group,
-        sub_group=clip_sub_group,
+        clip_group,
+        clip_sub_group,
+        clips=[_mp4_file(b'first')],
     )
     await store.store(
-        [_mp4_file(b'second')],
-        group=clip_group,
-        sub_group=clip_sub_group,
+        clip_group,
+        clip_sub_group,
+        clips=[_mp4_file(b'second')],
     )
 
     await store.compact(

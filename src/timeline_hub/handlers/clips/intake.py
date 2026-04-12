@@ -1139,9 +1139,9 @@ async def _store_buffered_clips(
         if not clip_file_batch:
             continue
         result += await services.clip_store.store(
-            clip_file_batch,
-            group=clip_group,
-            sub_group=clip_sub_group,
+            clip_group,
+            clip_sub_group,
+            clips=clip_file_batch,
         )
 
     return result
@@ -1234,12 +1234,12 @@ async def _store_route_batches(
         stored_any = False
         for start in range(0, len(route_batch.messages), _ROUTE_STORE_CHUNK_SIZE):
             batch_result = await services.clip_store.store(
-                await _video_messages_to_clip_files(
+                route_batch.clip_group,
+                clip_sub_group,
+                clips=await _video_messages_to_clip_files(
                     bot=bot,
                     messages=route_batch.messages[start : start + _ROUTE_STORE_CHUNK_SIZE],
                 ),
-                group=route_batch.clip_group,
-                sub_group=clip_sub_group,
             )
             result += batch_result
             if batch_result.stored_count > 0:

@@ -185,7 +185,7 @@ class _ProduceClipStore:
         self._fetched_batches = fetched_batches
         self.fetch_calls: list[tuple[ClipGroup, ClipSubGroup, tuple[str, ...] | None, AudioNormalization | None]] = []
 
-    async def store(self, clips, *, group: ClipGroup, sub_group: ClipSubGroup) -> StoreResult:
+    async def store(self, group: ClipGroup, sub_group: ClipSubGroup, *, clips) -> StoreResult:
         self.events.append(('store', (list(clips), group, sub_group)))
         return next(self._store_results)
 
@@ -1413,14 +1413,14 @@ async def test_route_action_stores_clips_in_caption_route_order_across_message_g
     buffer.flush_grouped.assert_called_once_with(77)
     assert services.chat_message_buffer.peek(77) == []
     clip_store.store.assert_awaited_once()
-    stored_clips = clip_store.store.await_args.args[0]
+    stored_clips = clip_store.store.await_args.kwargs['clips']
     assert stored_clips == [_mp4_file(b'one'), _mp4_file(b'two'), _mp4_file(b'three')]
-    assert clip_store.store.await_args.kwargs['group'] == ClipGroup(
+    assert clip_store.store.await_args.args[0] == ClipGroup(
         universe=Universe.WEST,
         year=2025,
         season=Season.S1,
     )
-    assert clip_store.store.await_args.kwargs['sub_group'] == ClipSubGroup(
+    assert clip_store.store.await_args.args[1] == ClipSubGroup(
         sub_season=SubSeason.NONE,
         scope=Scope.SOURCE,
     )
@@ -1505,22 +1505,22 @@ async def test_route_action_splits_store_calls_when_caption_route_overrides() ->
     )
 
     assert clip_store.store.await_count == 2
-    first_batch = clip_store.store.await_args_list[0].args[0]
-    second_batch = clip_store.store.await_args_list[1].args[0]
+    first_batch = clip_store.store.await_args_list[0].kwargs['clips']
+    second_batch = clip_store.store.await_args_list[1].kwargs['clips']
     assert first_batch == [_mp4_file(b'one'), _mp4_file(b'two')]
     assert second_batch == [_mp4_file(b'three'), _mp4_file(b'four')]
-    assert clip_store.store.await_args_list[0].kwargs['group'] == ClipGroup(
+    assert clip_store.store.await_args_list[0].args[0] == ClipGroup(
         universe=Universe.WEST,
         year=2025,
         season=Season.S1,
     )
-    assert clip_store.store.await_args_list[1].kwargs['group'] == ClipGroup(
+    assert clip_store.store.await_args_list[1].args[0] == ClipGroup(
         universe=Universe.EAST,
         year=2024,
         season=Season.S2,
     )
     assert all(
-        call.kwargs['sub_group'] == ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE)
+        call.args[1] == ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.SOURCE)
         for call in clip_store.store.await_args_list
     )
     assert message.edit_text.await_args_list[0] == call('Routing...', reply_markup=None)
@@ -1600,10 +1600,12 @@ async def test_route_action_chunks_long_single_route_group_without_duplicate_pro
     )
 
     assert clip_store.store.await_count == 2
-    assert clip_store.store.await_args_list[0].args[0] == [_mp4_file(f'clip-{index}'.encode()) for index in range(1, 9)]
-    assert clip_store.store.await_args_list[1].args[0] == [_mp4_file(b'clip-9'), _mp4_file(b'clip-10')]
+    assert clip_store.store.await_args_list[0].kwargs['clips'] == [
+        _mp4_file(f'clip-{index}'.encode()) for index in range(1, 9)
+    ]
+    assert clip_store.store.await_args_list[1].kwargs['clips'] == [_mp4_file(b'clip-9'), _mp4_file(b'clip-10')]
     assert all(
-        call.kwargs['group'] == ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1)
+        call.args[0] == ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1)
         for call in clip_store.store.await_args_list
     )
     assert message.edit_text.await_args_list[0] == call('Routing...', reply_markup=None)
@@ -1673,20 +1675,22 @@ async def test_route_action_chunks_per_route_group_without_crossing_route_bounda
     )
 
     assert clip_store.store.await_count == 3
-    assert clip_store.store.await_args_list[0].args[0] == [_mp4_file(f'clip-{index}'.encode()) for index in range(1, 9)]
-    assert clip_store.store.await_args_list[1].args[0] == [_mp4_file(b'clip-9')]
-    assert clip_store.store.await_args_list[2].args[0] == [_mp4_file(b'clip-10')]
-    assert clip_store.store.await_args_list[0].kwargs['group'] == ClipGroup(
+    assert clip_store.store.await_args_list[0].kwargs['clips'] == [
+        _mp4_file(f'clip-{index}'.encode()) for index in range(1, 9)
+    ]
+    assert clip_store.store.await_args_list[1].kwargs['clips'] == [_mp4_file(b'clip-9')]
+    assert clip_store.store.await_args_list[2].kwargs['clips'] == [_mp4_file(b'clip-10')]
+    assert clip_store.store.await_args_list[0].args[0] == ClipGroup(
         universe=Universe.WEST,
         year=2025,
         season=Season.S1,
     )
-    assert clip_store.store.await_args_list[1].kwargs['group'] == ClipGroup(
+    assert clip_store.store.await_args_list[1].args[0] == ClipGroup(
         universe=Universe.WEST,
         year=2025,
         season=Season.S1,
     )
-    assert clip_store.store.await_args_list[2].kwargs['group'] == ClipGroup(
+    assert clip_store.store.await_args_list[2].args[0] == ClipGroup(
         universe=Universe.EAST,
         year=2024,
         season=Season.S2,
@@ -1770,20 +1774,20 @@ async def test_route_action_updates_active_route_from_standalone_text_and_clip_c
     )
 
     assert clip_store.store.await_count == 3
-    assert clip_store.store.await_args_list[0].args[0] == [_mp4_file(b'one')]
-    assert clip_store.store.await_args_list[1].args[0] == [_mp4_file(b'two')]
-    assert clip_store.store.await_args_list[2].args[0] == [_mp4_file(b'three'), _mp4_file(b'four')]
-    assert clip_store.store.await_args_list[0].kwargs['group'] == ClipGroup(
+    assert clip_store.store.await_args_list[0].kwargs['clips'] == [_mp4_file(b'one')]
+    assert clip_store.store.await_args_list[1].kwargs['clips'] == [_mp4_file(b'two')]
+    assert clip_store.store.await_args_list[2].kwargs['clips'] == [_mp4_file(b'three'), _mp4_file(b'four')]
+    assert clip_store.store.await_args_list[0].args[0] == ClipGroup(
         universe=Universe.WEST,
         year=2025,
         season=Season.S1,
     )
-    assert clip_store.store.await_args_list[1].kwargs['group'] == ClipGroup(
+    assert clip_store.store.await_args_list[1].args[0] == ClipGroup(
         universe=Universe.EAST,
         year=2024,
         season=Season.S2,
     )
-    assert clip_store.store.await_args_list[2].kwargs['group'] == ClipGroup(
+    assert clip_store.store.await_args_list[2].args[0] == ClipGroup(
         universe=Universe.WEST,
         year=2025,
         season=Season.S2,
@@ -1921,8 +1925,8 @@ async def test_route_action_uses_latest_valid_pre_clip_text_before_first_video()
         state,
     )
 
-    assert clip_store.store.await_args.args[0] == [_mp4_file(b'one')]
-    assert clip_store.store.await_args.kwargs['group'] == ClipGroup(
+    assert clip_store.store.await_args.kwargs['clips'] == [_mp4_file(b'one')]
+    assert clip_store.store.await_args.args[0] == ClipGroup(
         universe=Universe.WEST,
         year=2025,
         season=Season.S1,
@@ -1973,7 +1977,7 @@ async def test_route_action_ignores_invalid_pre_clip_text_until_valid_route_text
         state,
     )
 
-    assert clip_store.store.await_args.kwargs['group'] == ClipGroup(
+    assert clip_store.store.await_args.args[0] == ClipGroup(
         universe=Universe.EAST,
         year=2024,
         season=Season.S2,
@@ -3247,16 +3251,16 @@ async def test_store_scope_selection_aggregates_results_and_sends_exact_summary(
     expected_selected = _selected_kwargs('Store', 'West', '2025', '1', 'Collection')
     _assert_format_kwargs(message.edit_text.await_args.kwargs, expected_selected)
     assert clip_store.store.await_count == 2
-    first_group = clip_store.store.await_args_list[0].args[0]
-    second_group = clip_store.store.await_args_list[1].args[0]
+    first_group = clip_store.store.await_args_list[0].kwargs['clips']
+    second_group = clip_store.store.await_args_list[1].kwargs['clips']
     assert first_group == [_mp4_file(b'one')]
     assert second_group == [_mp4_file(b'two'), _mp4_file(b'three')]
     expected_group = ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1)
     expected_sub_group = ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.COLLECTION)
-    assert clip_store.store.await_args_list[0].kwargs['group'] == expected_group
-    assert clip_store.store.await_args_list[0].kwargs['sub_group'] == expected_sub_group
-    assert clip_store.store.await_args_list[1].kwargs['group'] == expected_group
-    assert clip_store.store.await_args_list[1].kwargs['sub_group'] == expected_sub_group
+    assert clip_store.store.await_args_list[0].args[0] == expected_group
+    assert clip_store.store.await_args_list[0].args[1] == expected_sub_group
+    assert clip_store.store.await_args_list[1].args[0] == expected_group
+    assert clip_store.store.await_args_list[1].args[1] == expected_sub_group
     clip_store.compact.assert_not_awaited()
     message.answer.assert_awaited_once_with(
         **Text(
@@ -3483,7 +3487,7 @@ async def test_store_scope_selection_stores_bytes_when_telegram_filename_is_miss
         state,
     )
 
-    stored_clips = clip_store.store.await_args.args[0]
+    stored_clips = clip_store.store.await_args.kwargs['clips']
     assert stored_clips == [_mp4_file(b'one')]
 
 
