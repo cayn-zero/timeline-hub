@@ -7,7 +7,7 @@ import pytest
 from aiogram.types import InlineKeyboardButton
 from aiogram.utils.formatting import Bold, Text
 
-import timeline_hub.handlers.clips.intake as intake_module
+import timeline_hub.handlers.clips.ingest as intake_module
 import timeline_hub.handlers.clips.retrieve as retrieve_module
 from timeline_hub.handlers.clips.common import (
     ALL_SCOPES_CALLBACK_VALUE,
@@ -24,7 +24,7 @@ from timeline_hub.handlers.clips.common import (
     selected_text,
     selection_labels,
 )
-from timeline_hub.handlers.clips.intake import (
+from timeline_hub.handlers.clips.ingest import (
     IntakeAction,
     IntakeCallbackData,
     ReorderCallbackData,
