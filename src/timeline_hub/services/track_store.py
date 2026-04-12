@@ -9,7 +9,7 @@ from typing import Self, TypeVar
 
 from timeline_hub.infra.ffmpeg import create_audio_variant, probe_audio_sample_rate
 from timeline_hub.infra.s3 import Key, Prefix, S3Client, S3ContentType, S3ObjectNotFoundError
-from timeline_hub.types import Extension, FileBytes
+from timeline_hub.types import Extension, FileBytes, InvalidExtensionError
 
 _TRACKS_PREFIX = 'tracks'
 _PRESETS_FILENAME = 'presets.json'
@@ -19,6 +19,12 @@ _INSTRUMENTAL_SUFFIX = '-instrumental'
 
 type TrackId = str
 type PresetId = int
+
+
+def _require_extension(file: FileBytes, expected: Extension, field: str) -> None:
+    """Require one explicit `FileBytes` extension at a public API boundary."""
+    if file.extension is not expected:
+        raise InvalidExtensionError(f'{field} must use Extension.{expected.name}')
 
 
 class Season(IntEnum):
@@ -106,8 +112,7 @@ class Track:
 
         if not isinstance(self.audio, FileBytes):
             raise ValueError('Track.audio must be FileBytes')
-        if self.audio.extension is not Extension.OPUS:
-            raise ValueError('Track.audio must use Extension.OPUS')
+        _require_extension(self.audio, Extension.OPUS, 'Track.audio')
 
         has_cover = self.cover is not None
         has_album_id = self.album_id is not None
@@ -117,8 +122,7 @@ class Track:
         if has_cover:
             if not isinstance(self.cover, FileBytes):
                 raise ValueError('Track.cover must be FileBytes')
-            if self.cover.extension is not Extension.JPG:
-                raise ValueError('Track.cover must use Extension.JPG')
+            _require_extension(self.cover, Extension.JPG, 'Track.cover')
 
         if has_album_id:
             if not isinstance(self.album_id, str):
@@ -1095,11 +1099,9 @@ class TrackStore:
             TrackInvalidAudioFormatError: If `track.audio` is not 48_000 Hz audio.
             TrackManifestSyncError: If one or more track-store objects are written but a later stage fails.
         """
-        if track.audio.extension is not Extension.OPUS:
-            raise ValueError('Track.audio must use Extension.OPUS')
+        _require_extension(track.audio, Extension.OPUS, 'Track.audio')
         if track.cover is not None:
-            if track.cover.extension is not Extension.JPG:
-                raise ValueError('Track.cover must use Extension.JPG')
+            _require_extension(track.cover, Extension.JPG, 'Track.cover')
 
         sample_rate = await probe_audio_sample_rate(track.audio.data)
         if sample_rate != 48_000:
@@ -1202,20 +1204,21 @@ class TrackStore:
         *,
         artists: tuple[str, ...] | None = None,
         title: str | None = None,
-        audio_bytes: bytes | None = None,
-        instrumental_bytes: bytes | None = None,
-        cover_bytes: bytes | None = None,
+        audio: FileBytes | None = None,
+        instrumental: FileBytes | None = None,
+        cover: FileBytes | None = None,
     ) -> None:
         """Update selected authoritative track components in place.
 
         This method mutates only the selected authoritative components for the
         provided `(group, track_id)`. Omitted fields remain unchanged.
-        `instrumental_bytes` may either attach the first authoritative
+        `instrumental` may either attach the first authoritative
         instrumental or replace the existing one. Cover updates are the one
-        album-linked exception: `cover_bytes` fans out across all current
+        album-linked exception: `cover` fans out across all current
         manifest entries with the same `album_id`, while preserving one
-        physical `.jpg` cover object per track. Any updated original or
-        instrumental audio is persisted as `.opus`.
+        physical `.jpg` cover object per track. Updated original audio and
+        instrumental audio must be Opus `FileBytes`. Updated cover must be
+        JPG `FileBytes`.
 
         Invariant:
             All stored audio must have a sample rate of exactly 48_000 Hz.
@@ -1232,14 +1235,21 @@ class TrackStore:
             TrackInvalidAudioFormatError: If provided audio bytes are not 48_000 Hz audio.
             TrackUpdateManifestSyncError: If one or more object mutations are applied but a later stage fails.
         """
-        if (
-            artists is None
-            and title is None
-            and audio_bytes is None
-            and instrumental_bytes is None
-            and cover_bytes is None
-        ):
+        if artists is None and title is None and audio is None and instrumental is None and cover is None:
             raise ValueError('update() requires at least one update field')
+
+        if audio is not None:
+            if not isinstance(audio, FileBytes):
+                raise ValueError('audio must be FileBytes')
+            _require_extension(audio, Extension.OPUS, 'audio')
+        if instrumental is not None:
+            if not isinstance(instrumental, FileBytes):
+                raise ValueError('instrumental must be FileBytes')
+            _require_extension(instrumental, Extension.OPUS, 'instrumental')
+        if cover is not None:
+            if not isinstance(cover, FileBytes):
+                raise ValueError('cover must be FileBytes')
+            _require_extension(cover, Extension.JPG, 'cover')
 
         validated_artists = self._validate_update_artists(artists)
         validated_title = self._validate_update_title(title)
@@ -1253,12 +1263,15 @@ class TrackStore:
         manifest = (await self._require_group_manifest(group, sub_season=None)).copy()
         entry = self._require_manifest_entry(manifest, group=group, track_id=track_id)
 
-        validated_audio_bytes = await self._validate_update_audio_bytes(audio_bytes, track_id=track_id)
-        validated_instrumental_bytes = await self._validate_update_instrumental_bytes(
-            instrumental_bytes,
+        validated_audio_bytes = await self._validate_update_audio_bytes(
+            None if audio is None else audio.data,
             track_id=track_id,
         )
-        validated_cover_bytes = self._validate_update_cover_bytes(cover_bytes)
+        validated_instrumental_bytes = await self._validate_update_instrumental_bytes(
+            None if instrumental is None else instrumental.data,
+            track_id=track_id,
+        )
+        validated_cover_bytes = self._validate_update_cover_bytes(None if cover is None else cover.data)
 
         # Set up the authoritative object keys and staged manifest state.
         track_key = self._track_key(track_group_prefix, track_id)

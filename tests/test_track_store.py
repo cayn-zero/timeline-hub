@@ -438,7 +438,8 @@ def test_file_bytes_rejects_empty_data() -> None:
     ],
 )
 def test_track_rejects_invalid_fields(kwargs: dict[str, object], message: str) -> None:
-    with pytest.raises(ValueError, match=message):
+    expected_error = InvalidExtensionError if 'must use Extension.' in message else ValueError
+    with pytest.raises(expected_error, match=message):
         Track(
             artists=kwargs.get('artists', ('artist',)),
             title=kwargs.get('title', 'title'),
@@ -2073,7 +2074,7 @@ async def test_update_attaches_first_instrumental_uploads_and_rewrites_manifest(
     )
     store = _store(s3_client)
 
-    await store.update(group, _UUID_1, instrumental_bytes=b'new-instrumental')
+    await store.update(group, _UUID_1, instrumental=FileBytes(data=b'new-instrumental', extension=Extension.OPUS))
 
     assert s3_client.objects[instrumental_key] == b'new-instrumental'
     expected_manifest = _manifest_payload(
@@ -2138,7 +2139,7 @@ async def test_update_instrumental_raises_for_unknown_track_id_in_group(
     )
 
     with pytest.raises(ValueError, match=f'Track id {_UUID_2} does not exist in group'):
-        await store.update(group, _UUID_2, instrumental_bytes=b'instrumental')
+        await store.update(group, _UUID_2, instrumental=FileBytes(data=b'instrumental', extension=Extension.OPUS))
 
 
 @pytest.mark.asyncio
@@ -2178,7 +2179,7 @@ async def test_update_first_instrumental_attach_wraps_manifest_write_failure_as_
     store = _store(s3_client)
 
     with pytest.raises(TrackUpdateManifestSyncError, match='manifest_write') as excinfo:
-        await store.update(group, _UUID_1, instrumental_bytes=b'new-instrumental')
+        await store.update(group, _UUID_1, instrumental=FileBytes(data=b'new-instrumental', extension=Extension.OPUS))
 
     assert excinfo.value.stage == 'manifest_write'
     assert excinfo.value.track_id == _UUID_1
@@ -2242,7 +2243,7 @@ async def test_update_instrumental_rejects_non_48k_audio_before_writes(
     store = _store(s3_client)
 
     with pytest.raises(TrackInvalidAudioFormatError, match='Audio sample rate must be 48000 Hz, got 44100') as excinfo:
-        await store.update(group, _UUID_1, instrumental_bytes=b'bad-instrumental')
+        await store.update(group, _UUID_1, instrumental=FileBytes(data=b'bad-instrumental', extension=Extension.OPUS))
 
     assert excinfo.value.track_id == _UUID_1
     assert excinfo.value.reason == 'Audio sample rate must be 48000 Hz, got 44100'
@@ -2325,7 +2326,7 @@ async def test_update_cover_only_overwrites_cover_only() -> None:
     )
     store = _store(s3_client)
 
-    await store.update(group, _UUID_1, cover_bytes=b'new-cover')
+    await store.update(group, _UUID_1, cover=FileBytes(data=b'new-cover', extension=Extension.JPG))
 
     assert s3_client.objects[cover_key] == b'new-cover'
     assert s3_client.objects[manifest_key] == original_manifest
@@ -2356,7 +2357,7 @@ async def test_update_cover_updates_all_tracks_in_same_album_and_leaves_other_al
     )
     store = _store(s3_client)
 
-    await store.update(group, _UUID_2, cover_bytes=b'new-shared-cover')
+    await store.update(group, _UUID_2, cover=FileBytes(data=b'new-shared-cover', extension=Extension.JPG))
 
     assert s3_client.objects[cover_key_1] == b'new-shared-cover'
     assert s3_client.objects[cover_key_2] == b'new-shared-cover'
@@ -2423,7 +2424,7 @@ async def test_update_audio_overwrites_track_deletes_variants_and_preserves_inst
     )
     store = _store(s3_client)
 
-    await store.update(group, _UUID_1, audio_bytes=b'new-track')
+    await store.update(group, _UUID_1, audio=FileBytes(data=b'new-track', extension=Extension.OPUS))
 
     assert probe_calls == [b'new-track']
     assert s3_client.delete_keys_calls == [original_variant_keys]
@@ -2495,7 +2496,7 @@ async def test_update_audio_wraps_partial_variant_deletion_as_sync_error(
     store = _store(s3_client)
 
     with pytest.raises(TrackUpdateManifestSyncError, match='original_variant_delete') as excinfo:
-        await store.update(group, _UUID_1, audio_bytes=b'new-track')
+        await store.update(group, _UUID_1, audio=FileBytes(data=b'new-track', extension=Extension.OPUS))
 
     assert probe_calls == [b'new-track']
     assert excinfo.value.stage == 'original_variant_delete'
@@ -2580,7 +2581,12 @@ async def test_update_later_stage_sync_error_unions_prior_and_assumed_touched_ke
     store = _store(s3_client)
 
     with pytest.raises(TrackUpdateManifestSyncError, match='instrumental_variant_delete') as excinfo:
-        await store.update(group, _UUID_1, audio_bytes=b'new-track', instrumental_bytes=b'new-instrumental')
+        await store.update(
+            group,
+            _UUID_1,
+            audio=FileBytes(data=b'new-track', extension=Extension.OPUS),
+            instrumental=FileBytes(data=b'new-instrumental', extension=Extension.OPUS),
+        )
 
     assert probe_calls == [b'new-track', b'new-instrumental']
     assert excinfo.value.stage == 'instrumental_variant_delete'
@@ -2628,7 +2634,7 @@ async def test_update_instrumental_first_attach_sets_manifest_flags(monkeypatch:
     )
     store = _store(s3_client)
 
-    await store.update(group, _UUID_1, instrumental_bytes=b'new-instrumental')
+    await store.update(group, _UUID_1, instrumental=FileBytes(data=b'new-instrumental', extension=Extension.OPUS))
 
     assert probe_calls == [b'new-instrumental']
     assert s3_client.objects[instrumental_key] == b'new-instrumental'
@@ -2709,7 +2715,7 @@ async def test_update_instrumental_overwrites_authoritative_key_and_resets_varia
     )
     store = _store(s3_client)
 
-    await store.update(group, _UUID_1, instrumental_bytes=b'new-instrumental')
+    await store.update(group, _UUID_1, instrumental=FileBytes(data=b'new-instrumental', extension=Extension.OPUS))
 
     assert probe_calls == [b'new-instrumental']
     assert s3_client.delete_keys_calls == [instrumental_variant_keys]
@@ -2788,7 +2794,7 @@ async def test_update_instrumental_wraps_partial_variant_deletion_as_sync_error(
     store = _store(s3_client)
 
     with pytest.raises(TrackUpdateManifestSyncError, match='instrumental_variant_delete') as excinfo:
-        await store.update(group, _UUID_1, instrumental_bytes=b'new-instrumental')
+        await store.update(group, _UUID_1, instrumental=FileBytes(data=b'new-instrumental', extension=Extension.OPUS))
 
     assert probe_calls == [b'new-instrumental']
     assert excinfo.value.stage == 'instrumental_variant_delete'
@@ -2833,6 +2839,57 @@ async def test_update_rejects_missing_fields() -> None:
 
 
 @pytest.mark.asyncio
+async def test_update_rejects_audio_with_wrong_extension() -> None:
+    group = TrackGroup(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
+    manifest_key = _manifest_key(universe=group.universe, year=group.year, season=group.season)
+    store = _store(
+        _FakeS3Client(
+            objects={
+                _presets_key(): _presets_bytes(),
+                manifest_key: _manifest_bytes([_entry(id=_UUID_1)]),
+            }
+        )
+    )
+
+    with pytest.raises(InvalidExtensionError, match='audio must use Extension.OPUS'):
+        await store.update(group, _UUID_1, audio=FileBytes(data=b'new-track', extension=Extension.JPG))
+
+
+@pytest.mark.asyncio
+async def test_update_rejects_instrumental_with_wrong_extension() -> None:
+    group = TrackGroup(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
+    manifest_key = _manifest_key(universe=group.universe, year=group.year, season=group.season)
+    store = _store(
+        _FakeS3Client(
+            objects={
+                _presets_key(): _presets_bytes(),
+                manifest_key: _manifest_bytes([_entry(id=_UUID_1)]),
+            }
+        )
+    )
+
+    with pytest.raises(InvalidExtensionError, match='instrumental must use Extension.OPUS'):
+        await store.update(group, _UUID_1, instrumental=FileBytes(data=b'new-instrumental', extension=Extension.JPG))
+
+
+@pytest.mark.asyncio
+async def test_update_rejects_cover_with_wrong_extension() -> None:
+    group = TrackGroup(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
+    manifest_key = _manifest_key(universe=group.universe, year=group.year, season=group.season)
+    store = _store(
+        _FakeS3Client(
+            objects={
+                _presets_key(): _presets_bytes(),
+                manifest_key: _manifest_bytes([_entry(id=_UUID_1)]),
+            }
+        )
+    )
+
+    with pytest.raises(InvalidExtensionError, match='cover must use Extension.JPG'):
+        await store.update(group, _UUID_1, cover=FileBytes(data=b'new-cover', extension=Extension.OPUS))
+
+
+@pytest.mark.asyncio
 async def test_update_raises_sync_error_when_manifest_write_fails_after_cover_upload() -> None:
     group = TrackGroup(universe=TrackUniverse.WEST, year=2026, season=Season.S1)
     manifest_key = _manifest_key(universe=group.universe, year=group.year, season=group.season)
@@ -2849,7 +2906,7 @@ async def test_update_raises_sync_error_when_manifest_write_fails_after_cover_up
     store = _store(s3_client)
 
     with pytest.raises(TrackUpdateManifestSyncError, match='manifest_write') as excinfo:
-        await store.update(group, _UUID_1, cover_bytes=b'new-cover')
+        await store.update(group, _UUID_1, cover=FileBytes(data=b'new-cover', extension=Extension.JPG))
 
     assert excinfo.value.stage == 'manifest_write'
     assert excinfo.value.track_id == _UUID_1
@@ -2885,7 +2942,7 @@ async def test_update_cover_fan_out_failure_reports_conservative_target_cover_ke
     store = _store(s3_client)
 
     with pytest.raises(TrackUpdateManifestSyncError, match='cover_upload') as excinfo:
-        await store.update(group, _UUID_1, cover_bytes=b'new-cover')
+        await store.update(group, _UUID_1, cover=FileBytes(data=b'new-cover', extension=Extension.JPG))
 
     assert excinfo.value.stage == 'cover_upload'
     assert excinfo.value.track_id == _UUID_1
