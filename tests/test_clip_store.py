@@ -31,6 +31,7 @@ from timeline_hub.services.clip_store import (
     Universe,
     UnknownClipsError,
 )
+from timeline_hub.types import Extension, FileBytes, InvalidExtensionError
 
 _UUID_1 = uuid.UUID('018f05c1-f1a3-7b34-8d29-1f53a1c9d0e1').hex
 _UUID_2 = uuid.UUID('018f05c1-f1a3-7b34-8d29-1f53a1c9d0e2').hex
@@ -201,7 +202,7 @@ class _FakeS3Client:
 
 
 def _clip_key(*, year: int, season: Season, universe: Universe, clip_id: str) -> str:
-    return S3Client.join('clips', f'{universe}-{year}-{season}', clip_id + '.mp4')
+    return S3Client.join('clips', f'{universe}-{year}-{season}', clip_id + Extension.MP4.suffix)
 
 
 def _manifest_key(*, year: int, season: Season, universe: Universe) -> str:
@@ -217,7 +218,7 @@ def _manifest_payload(entries: list[ManifestEntry]) -> dict[str, list[dict[str, 
 
 
 def _normalized_clip_key(*, year: int, season: Season, universe: Universe, clip_id: str) -> str:
-    return S3Client.join('clips', f'{universe}-{year}-{season}', clip_id + '-normalized.mp4')
+    return S3Client.join('clips', f'{universe}-{year}-{season}', clip_id + '-normalized' + Extension.MP4.suffix)
 
 
 def _patch_hashes(monkeypatch: pytest.MonkeyPatch, hashes: dict[bytes, str]) -> None:
@@ -230,6 +231,17 @@ def _patch_hashes(monkeypatch: pytest.MonkeyPatch, hashes: dict[bytes, str]) -> 
 def _patch_uuid7(monkeypatch: pytest.MonkeyPatch, *clip_ids: str) -> None:
     uuids = iter(uuid.UUID(clip_id) for clip_id in clip_ids)
     monkeypatch.setattr(clip_store_module, '_uuid7', lambda: next(uuids))
+
+
+def _mp4_file(data: bytes) -> FileBytes:
+    return FileBytes(data=data, extension=Extension.MP4)
+
+
+def test_extension_mp4_supports_string_and_filename_parsing() -> None:
+    assert Extension.from_string('mp4') is Extension.MP4
+    assert Extension.from_string('.MP4') is Extension.MP4
+    assert Extension.from_filename('clip.mp4') is Extension.MP4
+    assert Extension.MP4.suffix == '.mp4'
 
 
 @pytest.mark.asyncio
@@ -429,14 +441,15 @@ async def test_fetch_returns_grouped_clips_with_portable_filenames(
 
     assert batches == [
         [
-            FetchedClip(id=_UUID_1, bytes=b'batch-1-first'),
-            FetchedClip(id=_UUID_2, bytes=b'batch-1-second'),
+            FetchedClip(id=_UUID_1, file=_mp4_file(b'batch-1-first')),
+            FetchedClip(id=_UUID_2, file=_mp4_file(b'batch-1-second')),
         ],
         [
-            FetchedClip(id=_UUID_3, bytes=b'batch-2-first'),
-            FetchedClip(id=_UUID_4, bytes=b'batch-2-second'),
+            FetchedClip(id=_UUID_3, file=_mp4_file(b'batch-2-first')),
+            FetchedClip(id=_UUID_4, file=_mp4_file(b'batch-2-second')),
         ],
     ]
+    assert all(clip.file.extension is Extension.MP4 for batch in batches for clip in batch)
 
 
 @pytest.mark.asyncio
@@ -523,14 +536,15 @@ async def test_fetch_with_audio_normalization_generates_normalized_twins_and_upd
     ]
     assert batches == [
         [
-            FetchedClip(id=_UUID_1, bytes=b'normalized:batch-1-first'),
-            FetchedClip(id=_UUID_2, bytes=b'normalized:batch-1-second'),
+            FetchedClip(id=_UUID_1, file=_mp4_file(b'normalized:batch-1-first')),
+            FetchedClip(id=_UUID_2, file=_mp4_file(b'normalized:batch-1-second')),
         ],
         [
-            FetchedClip(id=_UUID_3, bytes=b'normalized:batch-2-first'),
-            FetchedClip(id=_UUID_4, bytes=b'normalized:batch-2-second'),
+            FetchedClip(id=_UUID_3, file=_mp4_file(b'normalized:batch-2-first')),
+            FetchedClip(id=_UUID_4, file=_mp4_file(b'normalized:batch-2-second')),
         ],
     ]
+    assert all(clip.file.extension is Extension.MP4 for batch in batches for clip in batch)
     assert s3_client.objects[normalized_key_1] == b'normalized:batch-1-first'
     assert s3_client.objects[normalized_key_2] == b'normalized:batch-1-second'
     assert s3_client.objects[normalized_key_3] == b'normalized:batch-2-first'
@@ -643,8 +657,8 @@ async def test_fetch_with_same_audio_normalization_reuses_existing_normalized_tw
 
     assert batches == [
         [
-            FetchedClip(id=_UUID_1, bytes=b'normalized-first'),
-            FetchedClip(id=_UUID_2, bytes=b'normalized-second'),
+            FetchedClip(id=_UUID_1, file=_mp4_file(b'normalized-first')),
+            FetchedClip(id=_UUID_2, file=_mp4_file(b'normalized-second')),
         ]
     ]
     assert s3_client.put_calls == []
@@ -716,8 +730,8 @@ async def test_fetch_with_changed_audio_normalization_overwrites_stable_normaliz
     ]
     assert batches == [
         [
-            FetchedClip(id=_UUID_1, bytes=b'new:raw-first'),
-            FetchedClip(id=_UUID_2, bytes=b'new:raw-second'),
+            FetchedClip(id=_UUID_1, file=_mp4_file(b'new:raw-first')),
+            FetchedClip(id=_UUID_2, file=_mp4_file(b'new:raw-second')),
         ]
     ]
     assert s3_client.objects[normalized_key_1] == b'new:raw-first'
@@ -983,7 +997,7 @@ async def test_fetch_regenerates_missing_normalized_twin_when_manifest_says_it_e
     ]
 
     assert calls == [(b'raw-first', -14, 128)]
-    assert batches == [[FetchedClip(id=_UUID_1, bytes=b'regenerated:raw-first')]]
+    assert batches == [[FetchedClip(id=_UUID_1, file=_mp4_file(b'regenerated:raw-first'))]]
     assert s3_client.objects[normalized_key_1] == b'regenerated:raw-first'
     assert json.loads(s3_client.objects[manifest_key].decode('utf-8')) == _manifest_payload(
         [
@@ -1064,8 +1078,8 @@ async def test_fetch_with_clip_ids_returns_only_requested_sub_group_subset_in_ma
     ]
 
     assert batches == [
-        [FetchedClip(id=_UUID_1, bytes=b'batch-1-first')],
-        [FetchedClip(id=_UUID_3, bytes=b'batch-2-first')],
+        [FetchedClip(id=_UUID_1, file=_mp4_file(b'batch-1-first'))],
+        [FetchedClip(id=_UUID_3, file=_mp4_file(b'batch-2-first'))],
     ]
 
 
@@ -1419,7 +1433,7 @@ async def test_store_treats_existing_video_hash_as_duplicate(monkeypatch: pytest
     store = ClipStore(s3_client)
 
     result = await store.store(
-        [b'clip'],
+        [_mp4_file(b'clip')],
         group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
         sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
     )
@@ -1427,6 +1441,18 @@ async def test_store_treats_existing_video_hash_as_duplicate(monkeypatch: pytest
     assert result.stored_count == 0
     assert result.duplicate_count == 1
     assert s3_client.put_calls == []
+
+
+@pytest.mark.asyncio
+async def test_store_rejects_non_mp4_filebytes() -> None:
+    store = ClipStore(_FakeS3Client())
+
+    with pytest.raises(InvalidExtensionError, match='clips entries must use Extension.MP4'):
+        await store.store(
+            [FileBytes(data=b'clip', extension=Extension.JPG)],
+            group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+            sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
+        )
 
 
 @pytest.mark.asyncio
@@ -1441,8 +1467,8 @@ async def test_store_generates_new_ids_for_same_call_distinct_hashes(
 
     result = await store.store(
         [
-            b'first',
-            b'second',
+            _mp4_file(b'first'),
+            _mp4_file(b'second'),
         ],
         group=ClipGroup(universe=Universe.EAST, year=2024, season=Season.S1),
         sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
@@ -1485,9 +1511,9 @@ async def test_store_deduplicates_same_call_by_video_hash_and_keeps_dense_order(
 
     result = await store.store(
         [
-            b'first',
-            b'second',
-            b'third',
+            _mp4_file(b'first'),
+            _mp4_file(b'second'),
+            _mp4_file(b'third'),
         ],
         group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
         sub_group=ClipSubGroup(sub_season=SubSeason.C, scope=Scope.SOURCE),
@@ -1539,14 +1565,14 @@ async def test_store_creates_new_batch_per_call_and_resets_order(monkeypatch: py
 
     first_result = await store.store(
         [
-            b'first',
-            b'second',
+            _mp4_file(b'first'),
+            _mp4_file(b'second'),
         ],
         group=clip_group,
         sub_group=clip_sub_group,
     )
     second_result = await store.store(
-        [b'third'],
+        [_mp4_file(b'third')],
         group=clip_group,
         sub_group=clip_sub_group,
     )
@@ -1609,7 +1635,7 @@ async def test_store_all_duplicates_do_not_create_new_batch(monkeypatch: pytest.
     store = ClipStore(s3_client)
 
     result = await store.store(
-        [b'clip'],
+        [_mp4_file(b'clip')],
         group=ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
         sub_group=ClipSubGroup(sub_season=SubSeason.A, scope=Scope.COLLECTION),
     )
@@ -1652,7 +1678,7 @@ async def test_store_propagates_first_clip_upload_failure_without_sync_error(
 
     with pytest.raises(RuntimeError, match=f'boom putting {clip_key}'):
         await store.store(
-            [b'clip'],
+            [_mp4_file(b'clip')],
             group=clip_group,
             sub_group=clip_sub_group,
         )
@@ -1698,8 +1724,8 @@ async def test_store_raises_sync_error_when_later_clip_upload_fails(
     with pytest.raises(ClipManifestSyncError, match='Staged clip store failed at clip_upload') as excinfo:
         await store.store(
             [
-                b'first',
-                b'second',
+                _mp4_file(b'first'),
+                _mp4_file(b'second'),
             ],
             group=clip_group,
             sub_group=clip_sub_group,
@@ -1756,8 +1782,8 @@ async def test_store_raises_sync_error_when_manifest_write_fails(
     with pytest.raises(ClipManifestSyncError, match='Staged clip store failed at manifest_write') as excinfo:
         await store.store(
             [
-                b'first',
-                b'second',
+                _mp4_file(b'first'),
+                _mp4_file(b'second'),
             ],
             group=clip_group,
             sub_group=clip_sub_group,
@@ -2476,12 +2502,12 @@ async def test_compact_can_pull_newly_stored_single_clip_into_previous_batch_whe
     clip_sub_group = ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.EXTRA)
 
     await store.store(
-        [b'first'],
+        [_mp4_file(b'first')],
         group=clip_group,
         sub_group=clip_sub_group,
     )
     await store.store(
-        [b'second'],
+        [_mp4_file(b'second')],
         group=clip_group,
         sub_group=clip_sub_group,
     )

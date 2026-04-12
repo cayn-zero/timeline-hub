@@ -13,6 +13,7 @@ class InvalidExtensionError(ValueError):
 class Extension(StrEnum):
     """Supported file extensions for typed storage-boundary payloads."""
 
+    MP4 = 'mp4'
     OPUS = 'opus'
     JPG = 'jpg'
 

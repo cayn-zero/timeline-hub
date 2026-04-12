@@ -72,6 +72,7 @@ from timeline_hub.services.clip_store import (
 )
 from timeline_hub.services.container import Services
 from timeline_hub.services.message_buffer import ChatMessageBuffer
+from timeline_hub.types import Extension, FileBytes
 
 _CLIP_ID_1 = '018f05c1f1a37b348d291f53a1c9d0e1'
 _CLIP_ID_2 = '018f05c1f1a37b348d291f53a1c9d0e2'
@@ -159,7 +160,7 @@ class _RetrieveClipStore:
                 yield batch
                 continue
 
-            yield [FetchedClip(id=clip.id, bytes=b'normalized:' + clip.bytes) for clip in batch]
+            yield [FetchedClip(id=clip.id, file=_mp4_file(b'normalized:' + clip.file.data)) for clip in batch]
 
     async def list_sub_groups(self, group: ClipGroup) -> list[ClipSubGroup]:
         return list(self.sub_groups)
@@ -214,7 +215,7 @@ class _ProduceClipStore:
                 yield batch
                 continue
 
-            yield [FetchedClip(id=clip.id, bytes=b'normalized:' + clip.bytes) for clip in batch]
+            yield [FetchedClip(id=clip.id, file=_mp4_file(b'normalized:' + clip.file.data)) for clip in batch]
 
 
 def _services(
@@ -243,7 +244,11 @@ def _settings(**overrides: object) -> SimpleNamespace:
 
 
 def _stored_filename(group: ClipGroup, sub_group: ClipSubGroup, clip_id: str) -> str:
-    return f'{ClipStore.clip_identity_to_string(group, sub_group, clip_id)}.mp4'
+    return f'{ClipStore.clip_identity_to_string(group, sub_group, clip_id)}{Extension.MP4.suffix}'
+
+
+def _mp4_file(data: bytes) -> FileBytes:
+    return FileBytes(data=data, extension=Extension.MP4)
 
 
 def _fake_message(
@@ -1409,7 +1414,7 @@ async def test_route_action_stores_clips_in_caption_route_order_across_message_g
     assert services.chat_message_buffer.peek(77) == []
     clip_store.store.assert_awaited_once()
     stored_clips = clip_store.store.await_args.args[0]
-    assert stored_clips == [b'one', b'two', b'three']
+    assert stored_clips == [_mp4_file(b'one'), _mp4_file(b'two'), _mp4_file(b'three')]
     assert clip_store.store.await_args.kwargs['group'] == ClipGroup(
         universe=Universe.WEST,
         year=2025,
@@ -1502,8 +1507,8 @@ async def test_route_action_splits_store_calls_when_caption_route_overrides() ->
     assert clip_store.store.await_count == 2
     first_batch = clip_store.store.await_args_list[0].args[0]
     second_batch = clip_store.store.await_args_list[1].args[0]
-    assert first_batch == [b'one', b'two']
-    assert second_batch == [b'three', b'four']
+    assert first_batch == [_mp4_file(b'one'), _mp4_file(b'two')]
+    assert second_batch == [_mp4_file(b'three'), _mp4_file(b'four')]
     assert clip_store.store.await_args_list[0].kwargs['group'] == ClipGroup(
         universe=Universe.WEST,
         year=2025,
@@ -1595,8 +1600,8 @@ async def test_route_action_chunks_long_single_route_group_without_duplicate_pro
     )
 
     assert clip_store.store.await_count == 2
-    assert clip_store.store.await_args_list[0].args[0] == [f'clip-{index}'.encode() for index in range(1, 9)]
-    assert clip_store.store.await_args_list[1].args[0] == [b'clip-9', b'clip-10']
+    assert clip_store.store.await_args_list[0].args[0] == [_mp4_file(f'clip-{index}'.encode()) for index in range(1, 9)]
+    assert clip_store.store.await_args_list[1].args[0] == [_mp4_file(b'clip-9'), _mp4_file(b'clip-10')]
     assert all(
         call.kwargs['group'] == ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1)
         for call in clip_store.store.await_args_list
@@ -1668,9 +1673,9 @@ async def test_route_action_chunks_per_route_group_without_crossing_route_bounda
     )
 
     assert clip_store.store.await_count == 3
-    assert clip_store.store.await_args_list[0].args[0] == [f'clip-{index}'.encode() for index in range(1, 9)]
-    assert clip_store.store.await_args_list[1].args[0] == [b'clip-9']
-    assert clip_store.store.await_args_list[2].args[0] == [b'clip-10']
+    assert clip_store.store.await_args_list[0].args[0] == [_mp4_file(f'clip-{index}'.encode()) for index in range(1, 9)]
+    assert clip_store.store.await_args_list[1].args[0] == [_mp4_file(b'clip-9')]
+    assert clip_store.store.await_args_list[2].args[0] == [_mp4_file(b'clip-10')]
     assert clip_store.store.await_args_list[0].kwargs['group'] == ClipGroup(
         universe=Universe.WEST,
         year=2025,
@@ -1765,9 +1770,9 @@ async def test_route_action_updates_active_route_from_standalone_text_and_clip_c
     )
 
     assert clip_store.store.await_count == 3
-    assert clip_store.store.await_args_list[0].args[0] == [b'one']
-    assert clip_store.store.await_args_list[1].args[0] == [b'two']
-    assert clip_store.store.await_args_list[2].args[0] == [b'three', b'four']
+    assert clip_store.store.await_args_list[0].args[0] == [_mp4_file(b'one')]
+    assert clip_store.store.await_args_list[1].args[0] == [_mp4_file(b'two')]
+    assert clip_store.store.await_args_list[2].args[0] == [_mp4_file(b'three'), _mp4_file(b'four')]
     assert clip_store.store.await_args_list[0].kwargs['group'] == ClipGroup(
         universe=Universe.WEST,
         year=2025,
@@ -1916,7 +1921,7 @@ async def test_route_action_uses_latest_valid_pre_clip_text_before_first_video()
         state,
     )
 
-    assert clip_store.store.await_args.args[0] == [b'one']
+    assert clip_store.store.await_args.args[0] == [_mp4_file(b'one')]
     assert clip_store.store.await_args.kwargs['group'] == ClipGroup(
         universe=Universe.WEST,
         year=2025,
@@ -2932,7 +2937,7 @@ async def test_pull_scope_all_with_one_scope_sends_single_scope_normally() -> No
     clip_group = ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1)
     clip_sub_group = ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.COLLECTION)
     clip_store = _RetrieveClipStore(
-        {Scope.COLLECTION: [[FetchedClip(id=_CLIP_ID_1, bytes=b'1')]]},
+        {Scope.COLLECTION: [[FetchedClip(id=_CLIP_ID_1, file=_mp4_file(b'1'))]]},
         sub_groups=[clip_sub_group],
     )
     services = _services(clip_store=clip_store)
@@ -2985,7 +2990,7 @@ async def test_get_scope_all_requests_normalized_fetch_before_sending() -> None:
     clip_sub_group = ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.COLLECTION)
     bot = AsyncMock()
     clip_store = _RetrieveClipStore(
-        {Scope.COLLECTION: [[FetchedClip(id=_CLIP_ID_1, bytes=b'one')]]},
+        {Scope.COLLECTION: [[FetchedClip(id=_CLIP_ID_1, file=_mp4_file(b'one'))]]},
         sub_groups=[clip_sub_group],
     )
     services = _services(clip_store=clip_store)
@@ -3244,8 +3249,8 @@ async def test_store_scope_selection_aggregates_results_and_sends_exact_summary(
     assert clip_store.store.await_count == 2
     first_group = clip_store.store.await_args_list[0].args[0]
     second_group = clip_store.store.await_args_list[1].args[0]
-    assert first_group == [b'one']
-    assert second_group == [b'two', b'three']
+    assert first_group == [_mp4_file(b'one')]
+    assert second_group == [_mp4_file(b'two'), _mp4_file(b'three')]
     expected_group = ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1)
     expected_sub_group = ClipSubGroup(sub_season=SubSeason.NONE, scope=Scope.COLLECTION)
     assert clip_store.store.await_args_list[0].kwargs['group'] == expected_group
@@ -3312,8 +3317,8 @@ async def test_produce_scope_selection_stores_then_fetches_only_new_subset_via_s
             StoreResult(stored_count=2, duplicate_count=1, clip_ids=(_CLIP_ID_2, _CLIP_ID_3)),
         ],
         fetched_batches=[
-            [FetchedClip(id=_CLIP_ID_1, bytes=b'one')],
-            [FetchedClip(id=_CLIP_ID_2, bytes=b'two'), FetchedClip(id=_CLIP_ID_3, bytes=b'three')],
+            [FetchedClip(id=_CLIP_ID_1, file=_mp4_file(b'one'))],
+            [FetchedClip(id=_CLIP_ID_2, file=_mp4_file(b'two')), FetchedClip(id=_CLIP_ID_3, file=_mp4_file(b'three'))],
         ],
     )
     services = _services(clip_store=clip_store, buffer=buffer)
@@ -3410,7 +3415,7 @@ async def test_produce_scope_selection_with_no_new_clips_sends_summary_only() ->
 
     clip_store = _ProduceClipStore(
         store_results=[StoreResult(stored_count=0, duplicate_count=1)],
-        fetched_batches=[[FetchedClip(id=_CLIP_ID_1, bytes=b'nope')]],
+        fetched_batches=[[FetchedClip(id=_CLIP_ID_1, file=_mp4_file(b'nope'))]],
     )
     services = _services(clip_store=clip_store, buffer=buffer)
     bot = AsyncMock()
@@ -3479,7 +3484,7 @@ async def test_store_scope_selection_stores_bytes_when_telegram_filename_is_miss
     )
 
     stored_clips = clip_store.store.await_args.args[0]
-    assert stored_clips == [b'one']
+    assert stored_clips == [_mp4_file(b'one')]
 
 
 @pytest.mark.asyncio
@@ -4054,8 +4059,8 @@ async def test_send_stored_clip_batch_preserves_filename() -> None:
         group=clip_group,
         sub_group=clip_sub_group,
         clips=[
-            FetchedClip(id=_CLIP_ID_1, bytes=b'a'),
-            FetchedClip(id=_CLIP_ID_2, bytes=b'b'),
+            FetchedClip(id=_CLIP_ID_1, file=_mp4_file(b'a')),
+            FetchedClip(id=_CLIP_ID_2, file=_mp4_file(b'b')),
         ],
     )
 
@@ -4075,7 +4080,7 @@ async def test_send_stored_clip_batch_sends_single_clip_as_video() -> None:
         chat_id=5,
         group=clip_group,
         sub_group=clip_sub_group,
-        clips=[FetchedClip(id=_CLIP_ID_1, bytes=b'a')],
+        clips=[FetchedClip(id=_CLIP_ID_1, file=_mp4_file(b'a'))],
     )
 
     assert bot.send_video.await_args.kwargs['video'].filename == _stored_filename(
@@ -4090,8 +4095,8 @@ async def test_send_retrieve_scopes_sends_separator_only_between_scope_blocks_an
     services = _services(
         clip_store=_RetrieveClipStore(
             {
-                Scope.COLLECTION: [[FetchedClip(id=_CLIP_ID_1, bytes=b'1')]],
-                Scope.EXTRA: [[FetchedClip(id=_CLIP_ID_2, bytes=b'2')]],
+                Scope.COLLECTION: [[FetchedClip(id=_CLIP_ID_1, file=_mp4_file(b'1'))]],
+                Scope.EXTRA: [[FetchedClip(id=_CLIP_ID_2, file=_mp4_file(b'2'))]],
             }
         )
     )
@@ -4157,10 +4162,10 @@ async def test_send_retrieve_scopes_requests_normalized_fetch_and_sends_results(
     clip_store = _RetrieveClipStore(
         {
             Scope.COLLECTION: [
-                [FetchedClip(id=_CLIP_ID_1, bytes=b'one')],
+                [FetchedClip(id=_CLIP_ID_1, file=_mp4_file(b'one'))],
                 [
-                    FetchedClip(id=_CLIP_ID_2, bytes=b'two'),
-                    FetchedClip(id=_CLIP_ID_3, bytes=b'three'),
+                    FetchedClip(id=_CLIP_ID_2, file=_mp4_file(b'two')),
+                    FetchedClip(id=_CLIP_ID_3, file=_mp4_file(b'three')),
                 ],
             ]
         }
@@ -4197,10 +4202,10 @@ async def test_send_retrieve_scopes_requests_normalized_fetch_and_sends_results(
     ]
     assert [item.media.data for item in sent_media] == [b'normalized:two', b'normalized:three']
     assert clip_store.batches_by_scope[Scope.COLLECTION] == [
-        [FetchedClip(id=_CLIP_ID_1, bytes=b'one')],
+        [FetchedClip(id=_CLIP_ID_1, file=_mp4_file(b'one'))],
         [
-            FetchedClip(id=_CLIP_ID_2, bytes=b'two'),
-            FetchedClip(id=_CLIP_ID_3, bytes=b'three'),
+            FetchedClip(id=_CLIP_ID_2, file=_mp4_file(b'two')),
+            FetchedClip(id=_CLIP_ID_3, file=_mp4_file(b'three')),
         ],
     ]
 
@@ -4212,7 +4217,7 @@ async def test_send_retrieve_scopes_sends_raw_batches_when_normalization_is_disa
         clip_store=_RetrieveClipStore(
             {
                 Scope.COLLECTION: [
-                    [FetchedClip(id=_CLIP_ID_1, bytes=b'one')],
+                    [FetchedClip(id=_CLIP_ID_1, file=_mp4_file(b'one'))],
                 ]
             }
         )

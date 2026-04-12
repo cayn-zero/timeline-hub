@@ -61,7 +61,7 @@ from timeline_hub.services.clip_store import (
 )
 from timeline_hub.services.container import Services
 from timeline_hub.settings import Settings
-from timeline_hub.types import ChatId
+from timeline_hub.types import ChatId, Extension
 
 router = Router()
 
@@ -711,7 +711,7 @@ async def _send_stored_clip_batch(
         clip = clips[0]
         await bot.send_video(
             chat_id=chat_id,
-            video=BufferedInputFile(clip.bytes, filename=_fetched_clip_filename(group, sub_group, clip.id)),
+            video=BufferedInputFile(clip.file.data, filename=_fetched_clip_filename(group, sub_group, clip.id)),
         )
         return
 
@@ -719,7 +719,7 @@ async def _send_stored_clip_batch(
         chat_id=chat_id,
         media=[
             InputMediaVideo(
-                media=BufferedInputFile(clip.bytes, filename=_fetched_clip_filename(group, sub_group, clip.id)),
+                media=BufferedInputFile(clip.file.data, filename=_fetched_clip_filename(group, sub_group, clip.id)),
             )
             for clip in clips
         ],
@@ -728,7 +728,7 @@ async def _send_stored_clip_batch(
 
 def _fetched_clip_filename(group: ClipGroup, sub_group: ClipSubGroup, clip_id: str) -> str:
     identity = ClipStore.clip_identity_to_string(group, sub_group, clip_id)
-    return f'{identity}.mp4'
+    return f'{identity}{Extension.MP4.suffix}'
 
 
 async def _retrieve_sub_groups(

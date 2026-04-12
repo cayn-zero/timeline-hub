@@ -11,15 +11,20 @@ from loguru import logger
 
 from timeline_hub.infra.ffmpeg import hash_video_content, normalize_video_audio_loudness
 from timeline_hub.infra.s3 import Key, Prefix, S3Client, S3ContentType, S3ObjectNotFoundError
+from timeline_hub.types import Extension, FileBytes, InvalidExtensionError
 
 _CLIPS_PREFIX = 'clips'
 _MANIFEST_FILENAME = 'manifest.json'
-# Storage-contract suffix for persisted clip objects and normalized variants.
-_VIDEO_SUFFIX = '.mp4'
 _CLIP_GROUP_SEPARATOR = '-'
+_NORMALIZED_SUFFIX = '-normalized'
 
-type ClipBytes = bytes
 type ClipId = str
+
+
+def _require_extension(file: FileBytes, expected: Extension, field: str) -> None:
+    """Require one explicit `FileBytes` extension at a public API boundary."""
+    if file.extension is not expected:
+        raise InvalidExtensionError(f'{field} must use Extension.{expected.name}')
 
 
 class Season(IntEnum):
@@ -110,7 +115,7 @@ class FetchedClip:
     """Fetched clip payload identified only by clip id."""
 
     id: ClipId
-    bytes: bytes
+    file: FileBytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -482,8 +487,8 @@ class ClipStore:
     treated as stale cache.
 
     Clips are stored as `.mp4` objects with MIME type `video/mp4`.
-    `ClipStore` expects MP4-compatible input bytes, and all returned clip
-    bytes are MP4.
+    `ClipStore` validates MP4 `FileBytes` at the public boundary, then keeps
+    internal processing byte-based. All returned clip files are MP4.
     """
 
     def __init__(self, s3_client: S3Client) -> None:
@@ -532,7 +537,7 @@ class ClipStore:
 
     async def store(
         self,
-        clips: Sequence[ClipBytes],
+        clips: Sequence[FileBytes],
         *,
         group: ClipGroup,
         sub_group: ClipSubGroup,
@@ -558,9 +563,9 @@ class ClipStore:
         (single-writer). Concurrent writes are not supported and may lead to
         manifest overwrite and orphaned clips.
 
-        `clips` must contain MP4-encoded video bytes. `store()` does not
-        perform format validation, and behavior is undefined for non-MP4
-        input.
+        `clips` must contain MP4 `FileBytes`. `store()` validates the
+        explicit extension at the boundary, then unwraps to raw bytes for the
+        rest of the storage pipeline.
 
         Raises:
             ManifestCorruptedError: If the clip-group manifest exists but is malformed.
@@ -576,9 +581,13 @@ class ClipStore:
         seen_hashes: set[str] = set()
         seen_ids: set[ClipId] = set()
         duplicate_count = 0
-        accepted_clips: list[tuple[ClipId, str, ClipBytes]] = []
+        accepted_clips: list[tuple[ClipId, str, bytes]] = []
         uploaded_keys: list[Key] = []
-        for clip_bytes in clips:
+        for clip_file in clips:
+            if not isinstance(clip_file, FileBytes):
+                raise ValueError('clips entries must be FileBytes instances')
+            _require_extension(clip_file, Extension.MP4, 'clips entries')
+            clip_bytes = clip_file.data
             video_hash = await hash_video_content(clip_bytes)
             if manifest.has_video_hash(video_hash) or video_hash in seen_hashes:
                 duplicate_count += 1
@@ -596,7 +605,7 @@ class ClipStore:
             sub_season=sub_group.sub_season,
             scope=sub_group.scope,
         )
-        new_entries: list[tuple[ManifestEntry, ClipBytes]] = []
+        new_entries: list[tuple[ManifestEntry, bytes]] = []
         for order, (clip_id, video_hash, clip_bytes) in enumerate(accepted_clips, start=1):
             entry = ManifestEntry(
                 id=clip_id,
@@ -680,8 +689,8 @@ class ClipStore:
         Filtered results preserve the subgroup's canonical current manifest
         order.
 
-        Returned `FetchedClip.bytes` are always MP4, for both raw fetches and
-        audio-normalized fetches.
+        Returned `FetchedClip.file` values are always MP4, for both raw
+        fetches and audio-normalized fetches.
 
         Raises:
             ClipGroupNotFoundError: If the requested logical clip group has no matching clips.
@@ -744,7 +753,12 @@ class ClipStore:
                 for entry in batch_entries_list:
                     clip_key = self._clip_key(clip_group_prefix, entry.id)
                     clip_bytes = await self._s3_client.get_bytes(clip_key)
-                    clip_batch.append(FetchedClip(id=entry.id, bytes=clip_bytes))
+                    clip_batch.append(
+                        FetchedClip(
+                            id=entry.id,
+                            file=FileBytes(data=clip_bytes, extension=Extension.MP4),
+                        )
+                    )
                 yield clip_batch
                 continue
 
@@ -1100,10 +1114,10 @@ class ClipStore:
         return S3Client.join(clip_group_prefix, _MANIFEST_FILENAME)
 
     def _clip_key(self, clip_group_prefix: Prefix, clip_id: ClipId) -> Key:
-        return S3Client.join(clip_group_prefix, clip_id + _VIDEO_SUFFIX)
+        return S3Client.join(clip_group_prefix, clip_id + Extension.MP4.suffix)
 
     def _normalized_clip_key(self, clip_group_prefix: Prefix, clip_id: ClipId) -> Key:
-        return S3Client.join(clip_group_prefix, clip_id + '-normalized' + _VIDEO_SUFFIX)
+        return S3Client.join(clip_group_prefix, clip_id + _NORMALIZED_SUFFIX + Extension.MP4.suffix)
 
     def _new_clip_id(self, *, manifest: Manifest, seen_ids: set[ClipId]) -> ClipId:
         """Return a fresh hex UUIDv7 clip id for a newly created S3 clip object.
@@ -1198,7 +1212,10 @@ class ClipStore:
                             batch=entry.batch,
                             order=entry.order,
                         )
-                    clip_batch[index] = FetchedClip(id=entry.id, bytes=normalized_bytes)
+                    clip_batch[index] = FetchedClip(
+                        id=entry.id,
+                        file=FileBytes(data=normalized_bytes, extension=Extension.MP4),
+                    )
                     continue
 
                 normalized_bytes = await self._regenerate_normalized_twin(
@@ -1218,7 +1235,10 @@ class ClipStore:
                     batch=entry.batch,
                     order=entry.order,
                 )
-                clip_batch[index] = FetchedClip(id=entry.id, bytes=normalized_bytes)
+                clip_batch[index] = FetchedClip(
+                    id=entry.id,
+                    file=FileBytes(data=normalized_bytes, extension=Extension.MP4),
+                )
         except Exception as error:
             if uploaded_keys:
                 sync_error = NormalizedClipManifestSyncError(

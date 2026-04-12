@@ -78,7 +78,7 @@ from timeline_hub.services.clip_store import (
 from timeline_hub.services.container import Services
 from timeline_hub.services.message_buffer import MessageGroup
 from timeline_hub.settings import Settings
-from timeline_hub.types import ChatId
+from timeline_hub.types import ChatId, Extension, FileBytes
 
 router = Router()
 _TELEGRAM_MEDIA_GROUP_LIMIT = 10
@@ -1135,11 +1135,11 @@ async def _store_buffered_clips(
     message_groups = services.chat_message_buffer.flush_grouped(chat_id)
 
     for message_group in message_groups:
-        clip_bytes_batch = await _message_group_to_clip_bytes(bot=bot, message_group=message_group)
-        if not clip_bytes_batch:
+        clip_file_batch = await _message_group_to_clip_files(bot=bot, message_group=message_group)
+        if not clip_file_batch:
             continue
         result += await services.clip_store.store(
-            clip_bytes_batch,
+            clip_file_batch,
             group=clip_group,
             sub_group=clip_sub_group,
         )
@@ -1234,7 +1234,7 @@ async def _store_route_batches(
         stored_any = False
         for start in range(0, len(route_batch.messages), _ROUTE_STORE_CHUNK_SIZE):
             batch_result = await services.clip_store.store(
-                await _video_messages_to_clip_bytes(
+                await _video_messages_to_clip_files(
                     bot=bot,
                     messages=route_batch.messages[start : start + _ROUTE_STORE_CHUNK_SIZE],
                 ),
@@ -1259,36 +1259,44 @@ async def _store_route_batches(
     )
 
 
-async def _message_group_to_clip_bytes(
+async def _message_group_to_clip_files(
     *,
     bot: Bot,
     message_group: MessageGroup,
-) -> list[bytes]:
-    clips: list[bytes] = []
+) -> list[FileBytes]:
+    clips: list[FileBytes] = []
 
     for message in message_group:
         if message.video is None:
             continue
-        clips.append(await download_video_bytes(bot, file_id=message.video.file_id))
+        clips.append(
+            FileBytes(
+                data=await download_video_bytes(bot, file_id=message.video.file_id),
+                extension=Extension.MP4,
+            )
+        )
 
     return clips
 
 
-async def _video_messages_to_clip_bytes(
+async def _video_messages_to_clip_files(
     *,
     bot: Bot,
     messages: Sequence[Message],
-) -> list[bytes]:
-    async def to_clip_bytes(message: Message) -> bytes:
+) -> list[FileBytes]:
+    async def to_clip_file(message: Message) -> FileBytes:
         if message.video is None:
             raise ValueError('Route batches must contain only video messages')
-        return await download_video_bytes(bot, file_id=message.video.file_id)
+        return FileBytes(
+            data=await download_video_bytes(bot, file_id=message.video.file_id),
+            extension=Extension.MP4,
+        )
 
     # Route storage slices large route groups before calling this helper,
     # so downloads remain concurrent while each store() call stays bounded.
     # `gather()` preserves input order, which keeps the stored clip order aligned
     # with the original buffered message order.
-    return list(await asyncio.gather(*(to_clip_bytes(message) for message in messages)))
+    return list(await asyncio.gather(*(to_clip_file(message) for message in messages)))
 
 
 def _message_group_to_filenames(message_group: MessageGroup) -> list[str]:
