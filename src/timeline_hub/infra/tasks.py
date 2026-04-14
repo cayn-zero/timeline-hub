@@ -135,7 +135,8 @@ class TaskScheduler:
 
         # Once real task started, it can't be canceled. So remove it from scheduler
         _ = self._tasks.pop(key, None)
+        job_task = asyncio.ensure_future(job())
         try:
-            await asyncio.shield(job())
+            await asyncio.shield(job_task)
         except asyncio.CancelledError:
-            return
+            await asyncio.shield(job_task)

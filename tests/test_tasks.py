@@ -276,3 +276,39 @@ async def test_scheduler_does_not_cancel_job_after_it_starts_running() -> None:
     await supervisor.wait()
 
     assert not first_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_cancel_all_does_not_hide_started_job_failure(error_records: list[dict]) -> None:
+    received: TaskFailure | None = None
+    on_failure_called = asyncio.Event()
+    job_started = asyncio.Event()
+    allow_job_to_finish = asyncio.Event()
+
+    async def on_failure(failure: TaskFailure) -> None:
+        nonlocal received
+        received = failure
+        on_failure_called.set()
+
+    async def job() -> None:
+        job_started.set()
+        await allow_job_to_finish.wait()
+        raise RuntimeError('boom')
+
+    supervisor = TaskSupervisor(on_failure=on_failure)
+    scheduler = TaskScheduler(task_supervisor=supervisor)
+
+    scheduler.schedule(job, key='chat-1', delay=timedelta(seconds=0))
+    await asyncio.wait_for(job_started.wait(), timeout=1)
+
+    supervisor.cancel_all()
+    allow_job_to_finish.set()
+
+    await asyncio.wait_for(on_failure_called.wait(), timeout=1)
+    await supervisor.wait()
+
+    assert received is not None
+    assert isinstance(received.exception, RuntimeError)
+    failure_logs = [record for record in error_records if record['message'] == 'Detached task failed']
+    assert len(failure_logs) == 1
+    assert failure_logs[0]['has_exception'] is True
