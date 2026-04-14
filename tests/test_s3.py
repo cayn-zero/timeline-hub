@@ -427,6 +427,47 @@ async def test_delete_prefix_batches_and_counts_deleted_objects(
 
 
 @pytest.mark.asyncio
+async def test_delete_prefix_deletes_all_keys_when_listing_shifts_after_deletes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Client:
+        def __init__(self) -> None:
+            self.keys = [f'p/{index}' for index in range(1003)]
+            self.delete_batches: list[list[str]] = []
+
+        async def list_objects_v2(self, **kwargs):
+            token = kwargs.get('ContinuationToken')
+            start = int(token) if token is not None else 0
+            page_keys = self.keys[start : start + 1000]
+            next_token = None if start + 1000 >= len(self.keys) else str(start + 1000)
+            return {
+                'Contents': [{'Key': key} for key in page_keys],
+                'IsTruncated': next_token is not None,
+                'NextContinuationToken': next_token,
+            }
+
+        async def delete_objects(self, **kwargs):
+            batch = [item['Key'] for item in kwargs['Delete']['Objects']]
+            self.delete_batches.append(batch)
+            self.keys = [key for key in self.keys if key not in batch]
+            return {'Deleted': [{'Key': key} for key in batch]}
+
+    client = _Client()
+    monkeypatch.setattr(s3_module, 'get_session', lambda: _FakeSession(client))
+
+    storage = S3Client(_config())
+    await storage.open()
+    deleted = await storage.delete_prefix('p/')
+    await storage.close()
+
+    assert deleted == 1003
+    assert client.keys == []
+    assert len(client.delete_batches) == 2
+    assert len(client.delete_batches[0]) == 1000
+    assert len(client.delete_batches[1]) == 3
+
+
+@pytest.mark.asyncio
 async def test_delete_key_wraps_backend_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Client:
         async def delete_object(self, **_kwargs):

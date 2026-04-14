@@ -450,46 +450,10 @@ class S3Client:
             S3ListObjectsError: If listing objects under the prefix fails.
             S3BatchDeleteError: If a delete request fails or reports delete errors.
         """
-        client = self._require_client()
         if not prefix and not allow_root:
             raise ValueError('Refusing to delete entire bucket without allow_root=True')
-        effective_prefix = prefix or None
-
-        deleted = 0
-        batch: list[Key] = []
-        token: str | None = None
-
-        while True:
-            kwargs: dict[str, object] = {
-                'Bucket': self._config.bucket,
-                'MaxKeys': _LIST_MAX_KEYS,
-            }
-            if effective_prefix is not None:
-                kwargs['Prefix'] = effective_prefix
-            if token is not None:
-                kwargs['ContinuationToken'] = token
-
-            try:
-                response = await client.list_objects_v2(**kwargs)
-            except Exception as error:
-                raise S3ListObjectsError(bucket=self._config.bucket, prefix=effective_prefix) from error
-            contents = response.get('Contents', [])
-
-            for obj in contents:
-                batch.append(obj['Key'])
-                if len(batch) >= _DELETE_MAX_OBJECTS:
-                    deleted += await self._delete_batch(batch)
-                    batch.clear()
-
-            if not response.get('IsTruncated'):
-                break
-
-            token = response.get('NextContinuationToken')
-
-        if batch:
-            deleted += await self._delete_batch(batch)
-
-        return deleted
+        key_list = await self.list_keys(prefix or None)
+        return await self.delete_keys(key_list)
 
     async def move(
         self,
