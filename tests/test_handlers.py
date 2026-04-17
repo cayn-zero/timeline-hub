@@ -38,7 +38,6 @@ from timeline_hub.handlers.clips.ingest import (
     _show_store_sub_season_menu,
     _show_store_universe_menu,
     _store_year_options,
-    on_buffered_clip_message,
     on_intake_action,
     on_intake_menu,
     on_reorder_menu,
@@ -59,6 +58,7 @@ from timeline_hub.handlers.clips.retrieve import (
     on_retrieve_menu,
 )
 from timeline_hub.handlers.clips.route_planning import parse_route_text
+from timeline_hub.handlers.intake import on_buffered_relevant_message
 from timeline_hub.handlers.router import on_dummy_button
 from timeline_hub.services.clip_store import (
     AudioNormalization,
@@ -633,7 +633,7 @@ async def test_clip_action_selection_includes_store_button() -> None:
         video=_fake_video(file_id='file-1', file_name='clip.mp4'),
     )
 
-    await on_buffered_clip_message(message, services, settings)
+    await on_buffered_relevant_message(message, services, settings)
     assert scheduler.job is not None
 
     await scheduler.job()
@@ -657,6 +657,28 @@ async def test_clip_action_selection_includes_store_button() -> None:
         ['Reconcile', 'Produce', 'Compact'],
         ['Cancel'],
     ]
+
+
+@pytest.mark.asyncio
+async def test_text_only_buffered_batch_is_flushed_after_delayed_dispatch() -> None:
+    scheduler = _FakeScheduler()
+    buffer = ChatMessageBuffer()
+    services = _services(clip_store=SimpleNamespace(), scheduler=scheduler, buffer=buffer)
+    settings = _settings()
+    message = _fake_message(
+        chat_id=42,
+        message_id=1,
+        text='note',
+    )
+
+    await on_buffered_relevant_message(message, services, settings)
+    assert scheduler.job is not None
+    assert [buffered_message.message_id for buffered_message in services.chat_message_buffer.peek(42)] == [1]
+
+    await scheduler.job()
+
+    message.answer.assert_not_awaited()
+    assert services.chat_message_buffer.peek(42) == []
 
 
 @pytest.mark.asyncio

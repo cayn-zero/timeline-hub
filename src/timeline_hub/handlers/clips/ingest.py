@@ -151,29 +151,6 @@ _RECONCILE_FLOW = FlowMenuDefinition(
 )
 
 
-@router.message(F.chat.type == ChatType.PRIVATE)
-async def on_buffered_clip_message(
-    message: Message,
-    services: Services,
-    settings: Settings,
-) -> None:
-    chat_id = message.chat.id
-    services.chat_message_buffer.append(message, chat_id=chat_id)
-
-    async def send_clip_action_selection() -> None:
-        await try_dispatch_clip_intake(
-            message=message,
-            services=services,
-            settings=settings,
-        )
-
-    services.task_scheduler.schedule(
-        send_clip_action_selection,
-        key=chat_id,
-        delay=settings.forward_batch_timeout,
-    )
-
-
 @router.callback_query(
     IntakeActionCallbackData.filter(),
     F.message.chat.type == ChatType.PRIVATE,
