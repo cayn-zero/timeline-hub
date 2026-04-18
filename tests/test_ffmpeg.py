@@ -1,4 +1,7 @@
+import math
+import wave
 from datetime import timedelta
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -138,3 +141,54 @@ async def test_create_audio_variant_builds_speedup_filter_with_reverb(
 async def test_probe_audio_sample_rate_rejects_empty_input() -> None:
     with pytest.raises(ValueError, match='audio_bytes must not be empty'):
         await ffmpeg_module.probe_audio_sample_rate(b'')
+
+
+@pytest.mark.asyncio
+async def test_to_opus_rejects_empty_input() -> None:
+    with pytest.raises(ValueError, match='audio_bytes must not be empty'):
+        await ffmpeg_module.to_opus(b'')
+
+
+@pytest.mark.asyncio
+async def test_to_opus_rejects_invalid_bitrate() -> None:
+    with pytest.raises(ValueError, match='bitrate must be >= 1'):
+        await ffmpeg_module.to_opus(b'source-audio', bitrate=0)
+
+
+@pytest.mark.asyncio
+async def test_to_opus_converts_audio_to_non_empty_output() -> None:
+    audio_bytes = _build_wav_bytes(sample_rate=44_100)
+
+    opus_bytes = await ffmpeg_module.to_opus(audio_bytes)
+
+    assert opus_bytes
+    assert opus_bytes.startswith(b'OggS')
+
+
+@pytest.mark.asyncio
+async def test_to_opus_outputs_48khz_audio() -> None:
+    audio_bytes = _build_wav_bytes(sample_rate=44_100)
+
+    opus_bytes = await ffmpeg_module.to_opus(audio_bytes)
+
+    assert await ffmpeg_module.probe_audio_sample_rate(opus_bytes) == 48_000
+
+
+def _build_wav_bytes(*, sample_rate: int, duration_seconds: float = 0.1) -> bytes:
+    frame_count = int(sample_rate * duration_seconds)
+    amplitude = 12_000
+    frequency_hz = 440.0
+    frames = bytearray()
+
+    for index in range(frame_count):
+        sample = int(amplitude * math.sin(2 * math.pi * frequency_hz * (index / sample_rate)))
+        frames.extend(sample.to_bytes(2, byteorder='little', signed=True))
+
+    output = BytesIO()
+    with wave.open(output, 'wb') as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(bytes(frames))
+
+    return output.getvalue()

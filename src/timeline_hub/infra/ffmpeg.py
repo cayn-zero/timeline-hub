@@ -11,6 +11,76 @@ from typing import Any
 _HASH_READ_SIZE = 64 * 1024
 
 
+async def to_opus(
+    audio_bytes: bytes,
+    *,
+    bitrate: int = 160,
+    timeout: timedelta = timedelta(seconds=30),
+) -> bytes:
+    """Convert ffmpeg-readable audio bytes to Opus in an Ogg container.
+
+    Args:
+        audio_bytes: Source audio bytes in an ffmpeg-readable audio format.
+        bitrate: Target Opus bitrate in kbps.
+        timeout: Maximum time allowed for the ffmpeg subprocess run.
+
+    Raises:
+        ValueError: If parameters are invalid.
+        RuntimeError: If ffmpeg fails.
+    """
+    if not audio_bytes:
+        raise ValueError('audio_bytes must not be empty')
+
+    if isinstance(bitrate, bool) or not isinstance(bitrate, int):
+        raise ValueError('bitrate must be an integer')
+    if bitrate < 1:
+        raise ValueError('bitrate must be >= 1')
+
+    input_fd, input_name = tempfile.mkstemp(suffix='.audio')
+    output_fd, output_name = tempfile.mkstemp(suffix='.opus')
+    os.close(input_fd)
+    os.close(output_fd)
+
+    input_path = Path(input_name)
+    output_path = Path(output_name)
+
+    try:
+        input_path.write_bytes(audio_bytes)
+
+        cmd = (
+            'ffmpeg',
+            '-hide_banner',
+            '-loglevel',
+            'error',
+            '-nostats',
+            '-nostdin',
+            '-y',
+            '-threads',
+            '1',
+            '-i',
+            str(input_path),
+            '-vn',
+            '-ar',
+            '48000',
+            '-c:a',
+            'libopus',
+            '-b:a',
+            f'{bitrate}k',
+            '-vbr',
+            'on',
+            '-compression_level',
+            '10',
+            str(output_path),
+        )
+        await _run_ffmpeg(cmd, timeout)
+
+        return output_path.read_bytes()
+
+    finally:
+        input_path.unlink(missing_ok=True)
+        output_path.unlink(missing_ok=True)
+
+
 async def create_audio_variant(
     audio_bytes: bytes,
     *,
