@@ -1308,6 +1308,11 @@ async def test_track_store_happy_path_stores_all_prepared_tracks_in_order(monkey
     assert second_call.kwargs['track'].title == 'Title 2'
     assert second_call.kwargs['track'].cover == FileBytes(data=b'jpg-2', extension=Extension.JPG)
     assert second_call.kwargs['track'].audio == FileBytes(data=b'opus-2', extension=Extension.OPUS)
+    _assert_format_kwargs(
+        menu_message.edit_text.await_args_list[-1].kwargs,
+        _selected_kwargs('Store', 'West', str(year), '1', 'A'),
+    )
+    assert menu_message.edit_text.await_args_list[-1].kwargs['reply_markup'] is None
     menu_message.answer.assert_awaited_once_with(**Text('Stored: ', Bold('2')).as_kwargs())
     assert services.chat_message_buffer.peek_raw(42) == []
     assert state.current_state is None
@@ -1628,6 +1633,11 @@ async def test_track_store_partial_failure_reports_stored_titles_and_flushes_buf
     )
 
     assert len(failing_store.calls) == 2
+    _assert_format_kwargs(
+        menu_message.edit_text.await_args_list[-1].kwargs,
+        _selected_kwargs('Store', 'West', str(year), '1', 'A'),
+    )
+    assert menu_message.edit_text.await_args_list[-1].kwargs['reply_markup'] is None
     menu_message.answer.assert_awaited_once_with(text='Storing failed\nStored titles:\nTitle 1')
     assert services.chat_message_buffer.peek_raw(42) == []
     assert state.current_state is None

@@ -541,6 +541,18 @@ async def _execute_track_store(
         await handle_stale_selection(message=message, state=state)
         return
 
+    await message.edit_text(
+        **selected_text(
+            selected=_selected_store_path(
+                universe=universe,
+                year=year,
+                season=season,
+                sub_season=sub_season,
+            ),
+        ),
+        reply_markup=None,
+    )
+
     buffered_messages = services.chat_message_buffer.peek_flat(chat_id)
     try:
         prepared_tracks = await prepare_tracks_from_buffer(
@@ -556,18 +568,6 @@ async def _execute_track_store(
     if services.chat_message_buffer.version(chat_id) != expected_version:
         await handle_stale_selection(message=message, state=state)
         return
-
-    await message.edit_text(
-        **selected_text(
-            selected=_selected_store_path(
-                universe=universe,
-                year=year,
-                season=season,
-                sub_season=sub_season,
-            ),
-        ),
-        reply_markup=None,
-    )
 
     group = TrackGroup(universe=universe, year=year, season=season)
     # Multi-track store is best-effort convenience only.
