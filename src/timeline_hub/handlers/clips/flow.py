@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import TypeVar
 
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State
 from aiogram.types import InlineKeyboardButton, Message
@@ -23,10 +24,11 @@ from timeline_hub.handlers.menu import (
     selection_text,
     validate_flow_state,
 )
+from timeline_hub.handlers.retrieve_common import StepOutcome
 from timeline_hub.services.clip_store import ClipGroup, ClipSubGroup, Scope, Season, SubSeason, Universe
 
 type MenuCallbackPacker = Callable[[MenuAction, MenuStep, str], str]
-type ShowMenu = Callable[..., Awaitable[bool]]
+type ShowMenu = Callable[..., Awaitable[StepOutcome]]
 T = TypeVar('T')
 
 
@@ -120,30 +122,35 @@ async def show_fixed_option_menu(
         season=season,
         sub_season=sub_season,
     )
-    await message.edit_text(
-        **selection_text(
-            prompt=prompt,
-            selected=flow_selection_labels(
-                flow,
-                universe=universe,
-                year=year,
-                season=season,
-                sub_season=sub_season,
+    try:
+        await message.edit_text(
+            **selection_text(
+                prompt=prompt,
+                selected=flow_selection_labels(
+                    flow,
+                    universe=universe,
+                    year=year,
+                    season=season,
+                    sub_season=sub_season,
+                ),
+                message_width=message_width,
             ),
-            message_width=message_width,
-        ),
-        reply_markup=fixed_option_keyboard(
-            option_universe=option_universe,
-            available_options=available_options,
-            build_button=lambda option: flow_menu_button(
-                flow=flow,
-                step=step,
-                value=option_value(option),
-                text=option_text(option),
+            reply_markup=fixed_option_keyboard(
+                option_universe=option_universe,
+                available_options=available_options,
+                build_button=lambda option: flow_menu_button(
+                    flow=flow,
+                    step=step,
+                    value=option_value(option),
+                    text=option_text(option),
+                ),
+                back_button=flow_back_button(flow=flow, step=step),
             ),
-            back_button=flow_back_button(flow=flow, step=step),
-        ),
-    )
+        )
+    except TelegramBadRequest as error:
+        if 'message is not modified' in str(error):
+            return
+        raise
 
 
 async def show_or_stale(
@@ -153,7 +160,7 @@ async def show_or_stale(
     state: FSMContext,
     **kwargs: object,
 ) -> bool:
-    if await show_menu(message=message, state=state, **kwargs):
+    if await show_menu(message=message, state=state, **kwargs) is StepOutcome.SHOWN:
         return True
     await handle_stale_selection(message=message, state=state)
     return False

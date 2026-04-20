@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import date
 from enum import StrEnum, auto
 
@@ -21,6 +21,7 @@ from timeline_hub.handlers.clips.common import (
     parse_sub_season,
     parse_universe,
     parse_year,
+    set_flow_context,
 )
 from timeline_hub.handlers.clips.delivery import audio_normalization_from_settings, send_fetched_clip_batches
 from timeline_hub.handlers.clips.flow import (
@@ -50,6 +51,7 @@ from timeline_hub.handlers.menu import (
     stacked_keyboard,
     width_reserved_text,
 )
+from timeline_hub.handlers.retrieve_common import StepOutcome
 from timeline_hub.services.clip_store import (
     ClipGroup,
     ClipGroupNotFoundError,
@@ -64,6 +66,7 @@ from timeline_hub.settings import Settings
 from timeline_hub.types import ChatId
 
 router = Router()
+type BackStep = Callable[[], Awaitable[StepOutcome]]
 
 
 class RetrieveEntryAction(StrEnum):
@@ -84,6 +87,14 @@ class RetrieveCallbackData(CallbackData, prefix='clip_retrieve'):
 
 def _pack_retrieve_menu_callback(action: MenuAction, step: MenuStep, value: str) -> str:
     return RetrieveCallbackData(action=action, step=step, value=value).pack()
+
+
+async def _resolve_back_chain(*steps: BackStep, fallback: Callable[[], Awaitable[None]]) -> None:
+    """Try back targets in order and fall back only if all request skip-back."""
+    for step in steps:
+        if await step() is StepOutcome.SHOWN:
+            return
+    await fallback()
 
 
 _GET_FLOW = FlowMenuDefinition(
@@ -123,6 +134,7 @@ async def on_retrieve_entry(
     services: Services,
     settings: Settings,
     state: FSMContext,
+    bot: Bot | None = None,
 ) -> None:
     await callback.answer()
     message = callback_message(callback)
@@ -148,6 +160,8 @@ async def on_retrieve_entry(
     await _show_retrieve_universe_menu(
         message=message,
         state=state,
+        bot=bot,
+        services=services,
         settings=settings,
         flow=flow,
     )
@@ -189,6 +203,7 @@ async def on_retrieve_menu(
         await _on_retrieve_back(
             message=message,
             state=state,
+            bot=bot,
             services=services,
             settings=settings,
             step=callback_data.step,
@@ -211,6 +226,7 @@ async def _on_retrieve_back(
     *,
     message: Message,
     state: FSMContext,
+    bot: Bot,
     services: Services,
     settings: Settings,
     step: MenuStep,
@@ -227,12 +243,16 @@ async def _on_retrieve_back(
             await _show_retrieve_entry_menu(message=message, state=state, settings=settings)
 
         case MenuStep.YEAR:
-            await show_or_stale(
-                show_menu=_show_retrieve_universe_menu,
-                message=message,
-                state=state,
-                settings=settings,
-                flow=flow,
+            await _resolve_back_chain(
+                lambda: _show_retrieve_universe_menu(
+                    message=message,
+                    state=state,
+                    bot=bot,
+                    services=services,
+                    settings=settings,
+                    flow=flow,
+                ),
+                fallback=lambda: _show_retrieve_entry_menu(message=message, state=state, settings=settings),
             )
 
         case MenuStep.SEASON:
@@ -241,14 +261,26 @@ async def _on_retrieve_back(
                 await handle_stale_selection(message=message, state=state)
                 return
             universe, year = selection
-            await show_or_stale(
-                show_menu=_show_retrieve_year_menu,
-                message=message,
-                state=state,
-                universe=universe,
-                year=year,
-                settings=settings,
-                flow=flow,
+            await _resolve_back_chain(
+                lambda: _show_retrieve_year_menu(
+                    message=message,
+                    state=state,
+                    universe=universe,
+                    bot=bot,
+                    services=services,
+                    year=year,
+                    settings=settings,
+                    flow=flow,
+                ),
+                lambda: _show_retrieve_universe_menu(
+                    message=message,
+                    state=state,
+                    bot=bot,
+                    services=services,
+                    settings=settings,
+                    flow=flow,
+                ),
+                fallback=lambda: _show_retrieve_entry_menu(message=message, state=state, settings=settings),
             )
 
         case MenuStep.SUB_SEASON:
@@ -257,14 +289,36 @@ async def _on_retrieve_back(
                 await handle_stale_selection(message=message, state=state)
                 return
             universe, year = selection
-            await show_or_stale(
-                show_menu=_show_retrieve_season_menu,
-                message=message,
-                state=state,
-                universe=universe,
-                year=year,
-                settings=settings,
-                flow=flow,
+            await _resolve_back_chain(
+                lambda: _show_retrieve_season_menu(
+                    message=message,
+                    state=state,
+                    universe=universe,
+                    bot=bot,
+                    services=services,
+                    year=year,
+                    settings=settings,
+                    flow=flow,
+                ),
+                lambda: _show_retrieve_year_menu(
+                    message=message,
+                    state=state,
+                    universe=universe,
+                    bot=bot,
+                    services=services,
+                    year=year,
+                    settings=settings,
+                    flow=flow,
+                ),
+                lambda: _show_retrieve_universe_menu(
+                    message=message,
+                    state=state,
+                    bot=bot,
+                    services=services,
+                    settings=settings,
+                    flow=flow,
+                ),
+                fallback=lambda: _show_retrieve_entry_menu(message=message, state=state, settings=settings),
             )
 
         case MenuStep.SCOPE:
@@ -284,26 +338,79 @@ async def _on_retrieve_back(
                 return
 
             if available_sub_seasons(sub_groups) == [SubSeason.NONE]:
-                await show_or_stale(
-                    show_menu=_show_retrieve_season_menu,
+                await _resolve_back_chain(
+                    lambda: _show_retrieve_season_menu(
+                        message=message,
+                        state=state,
+                        universe=universe,
+                        bot=bot,
+                        services=services,
+                        year=year,
+                        settings=settings,
+                        flow=flow,
+                    ),
+                    lambda: _show_retrieve_year_menu(
+                        message=message,
+                        state=state,
+                        universe=universe,
+                        bot=bot,
+                        services=services,
+                        year=year,
+                        settings=settings,
+                        flow=flow,
+                    ),
+                    lambda: _show_retrieve_universe_menu(
+                        message=message,
+                        state=state,
+                        bot=bot,
+                        services=services,
+                        settings=settings,
+                        flow=flow,
+                    ),
+                    fallback=lambda: _show_retrieve_entry_menu(message=message, state=state, settings=settings),
+                )
+                return
+
+            await _resolve_back_chain(
+                lambda: _show_retrieve_sub_season_menu(
+                    message=message,
+                    state=state,
+                    clip_group=clip_group,
+                    bot=bot,
+                    services=services,
+                    settings=settings,
+                    flow=flow,
+                    sub_groups=sub_groups,
+                ),
+                lambda: _show_retrieve_season_menu(
                     message=message,
                     state=state,
                     universe=universe,
                     year=year,
+                    bot=bot,
+                    services=services,
                     settings=settings,
                     flow=flow,
-                )
-                return
-
-            await show_or_stale(
-                show_menu=_show_retrieve_sub_season_menu,
-                message=message,
-                state=state,
-                clip_group=clip_group,
-                services=services,
-                settings=settings,
-                flow=flow,
-                sub_groups=sub_groups,
+                ),
+                lambda: _show_retrieve_year_menu(
+                    message=message,
+                    state=state,
+                    universe=universe,
+                    bot=bot,
+                    services=services,
+                    year=year,
+                    settings=settings,
+                    flow=flow,
+                ),
+                lambda: _show_retrieve_universe_menu(
+                    message=message,
+                    state=state,
+                    bot=bot,
+                    services=services,
+                    settings=settings,
+                    flow=flow,
+                ),
+                fallback=lambda: _show_retrieve_entry_menu(message=message, state=state, settings=settings),
             )
 
 
@@ -334,6 +441,8 @@ async def _on_retrieve_select(
                 message=message,
                 state=state,
                 universe=universe,
+                bot=bot,
+                services=services,
                 settings=settings,
                 flow=flow,
             )
@@ -349,6 +458,8 @@ async def _on_retrieve_select(
                 message=message,
                 state=state,
                 universe=universe,
+                bot=bot,
+                services=services,
                 year=year,
                 settings=settings,
                 flow=flow,
@@ -367,6 +478,7 @@ async def _on_retrieve_select(
                 message=message,
                 state=state,
                 clip_group=clip_group,
+                bot=bot,
                 services=services,
                 settings=settings,
                 flow=flow,
@@ -386,6 +498,7 @@ async def _on_retrieve_select(
                 state=state,
                 clip_group=clip_group,
                 sub_season=sub_season,
+                bot=bot,
                 services=services,
                 settings=settings,
                 flow=flow,
@@ -462,17 +575,44 @@ async def _show_retrieve_year_menu(
     message: Message,
     state: FSMContext,
     universe: Universe,
+    bot: Bot | None = None,
+    services: Services | None = None,
     settings: Settings,
     flow: FlowMenuDefinition = _GET_FLOW,
     year: int | None = None,
-) -> bool:
+) -> StepOutcome:
     data = await state.get_data()
     groups = data.get('groups')
     if not isinstance(groups, list):
-        return False
+        return StepOutcome.SKIP_BACK
     available_years = available_group_years(groups, universe=universe)
     if year is not None and year not in available_years:
-        return False
+        return StepOutcome.SKIP_BACK
+    if len(available_years) == 1 and bot is not None and services is not None:
+        selected_year = available_years[0]
+        if selected_universe_year(data) == (universe, selected_year):
+            return StepOutcome.SKIP_BACK
+        await set_flow_context(
+            state=state,
+            mode=flow.mode,
+            menu_message_id=message.message_id,
+            fsm_state=flow.state_by_step[MenuStep.YEAR],
+            universe=universe,
+        )
+        await _on_retrieve_select(
+            message=message,
+            state=state,
+            services=services,
+            settings=settings,
+            bot=bot,
+            callback_data=RetrieveCallbackData(
+                action=MenuAction.SELECT,
+                step=MenuStep.YEAR,
+                value=str(selected_year),
+            ),
+            flow=flow,
+        )
+        return StepOutcome.SHOWN
     year_options = year_option_universe(current_year=date.today().year, min_year=settings.min_clip_year)
 
     await show_fixed_option_menu(
@@ -488,7 +628,7 @@ async def _show_retrieve_year_menu(
         option_value=str,
         option_text=str,
     )
-    return True
+    return StepOutcome.SHOWN
 
 
 async def _show_retrieve_season_menu(
@@ -497,18 +637,46 @@ async def _show_retrieve_season_menu(
     state: FSMContext,
     universe: Universe,
     year: int,
+    bot: Bot | None = None,
+    services: Services | None = None,
     settings: Settings,
     flow: FlowMenuDefinition = _GET_FLOW,
-) -> bool:
+) -> StepOutcome:
     data = await state.get_data()
     groups = data.get('groups')
     if not isinstance(groups, list):
-        return False
+        return StepOutcome.SKIP_BACK
     available_seasons = available_group_seasons(groups, universe=universe, year=year)
     allowed_seasons = store_allowed_seasons(year=year, today=date.today())
     available_seasons = [season for season in available_seasons if season in allowed_seasons]
     if not available_seasons:
-        return False
+        return StepOutcome.SKIP_BACK
+    if len(available_seasons) == 1 and bot is not None and services is not None:
+        selected_season = available_seasons[0]
+        if selected_universe_year_season(data) == (universe, year, selected_season):
+            return StepOutcome.SKIP_BACK
+        await set_flow_context(
+            state=state,
+            mode=flow.mode,
+            menu_message_id=message.message_id,
+            fsm_state=flow.state_by_step[MenuStep.SEASON],
+            universe=universe,
+            year=year,
+        )
+        await _on_retrieve_select(
+            message=message,
+            state=state,
+            services=services,
+            settings=settings,
+            bot=bot,
+            callback_data=RetrieveCallbackData(
+                action=MenuAction.SELECT,
+                step=MenuStep.SEASON,
+                value=str(int(selected_season)),
+            ),
+            flow=flow,
+        )
+        return StepOutcome.SHOWN
 
     await show_fixed_option_menu(
         flow=flow,
@@ -524,21 +692,48 @@ async def _show_retrieve_season_menu(
         option_value=lambda season: str(int(season)),
         option_text=lambda season: str(int(season)),
     )
-    return True
+    return StepOutcome.SHOWN
 
 
 async def _show_retrieve_universe_menu(
     *,
     message: Message,
     state: FSMContext,
+    bot: Bot | None = None,
+    services: Services | None = None,
     settings: Settings,
     flow: FlowMenuDefinition = _GET_FLOW,
-) -> bool:
+) -> StepOutcome:
     data = await state.get_data()
     groups = data.get('groups')
     if not isinstance(groups, list):
-        return False
+        return StepOutcome.SKIP_BACK
     available_universes = {group.universe for group in groups}
+    available_options = [universe for universe in Universe if universe in available_universes]
+    if len(available_options) == 1 and bot is not None and services is not None:
+        selected_universe_value = available_options[0]
+        if selected_universe(data) is selected_universe_value:
+            return StepOutcome.SKIP_BACK
+        await set_flow_context(
+            state=state,
+            mode=flow.mode,
+            menu_message_id=message.message_id,
+            fsm_state=flow.state_by_step[MenuStep.UNIVERSE],
+        )
+        await _on_retrieve_select(
+            message=message,
+            state=state,
+            services=services,
+            settings=settings,
+            bot=bot,
+            callback_data=RetrieveCallbackData(
+                action=MenuAction.SELECT,
+                step=MenuStep.UNIVERSE,
+                value=selected_universe_value.value,
+            ),
+            flow=flow,
+        )
+        return StepOutcome.SHOWN
     await show_fixed_option_menu(
         flow=flow,
         message=message,
@@ -547,11 +742,11 @@ async def _show_retrieve_universe_menu(
         step=MenuStep.UNIVERSE,
         prompt='Select universe:',
         option_universe=tuple(Universe),
-        available_options=[universe for universe in Universe if universe in available_universes],
+        available_options=available_options,
         option_value=lambda universe: universe.value,
         option_text=lambda universe: universe.value.title(),
     )
-    return True
+    return StepOutcome.SHOWN
 
 
 async def _show_retrieve_sub_season_menu(
@@ -559,18 +754,20 @@ async def _show_retrieve_sub_season_menu(
     message: Message,
     state: FSMContext,
     clip_group: ClipGroup,
+    bot: Bot | None = None,
     services: Services,
     settings: Settings,
     flow: FlowMenuDefinition = _GET_FLOW,
     sub_groups: list[ClipSubGroup] | None = None,
-) -> bool:
+) -> StepOutcome:
+    data = await state.get_data()
     if sub_groups is None:
         sub_groups = await _retrieve_sub_groups(
             services=services,
             clip_group=clip_group,
         )
     if sub_groups is None:
-        return False
+        return StepOutcome.SKIP_BACK
 
     sub_seasons = available_sub_seasons(sub_groups)
     if sub_seasons == [SubSeason.NONE]:
@@ -579,11 +776,44 @@ async def _show_retrieve_sub_season_menu(
             state=state,
             clip_group=clip_group,
             sub_season=SubSeason.NONE,
+            bot=bot,
             services=services,
             settings=settings,
             sub_groups=sub_groups,
             flow=flow,
         )
+    if len(sub_seasons) == 1 and bot is not None:
+        selected_sub_season = sub_seasons[0]
+        if selected_universe_year_season_sub_season(data) == (
+            clip_group.universe,
+            clip_group.year,
+            clip_group.season,
+            selected_sub_season,
+        ):
+            return StepOutcome.SKIP_BACK
+        await set_flow_context(
+            state=state,
+            mode=flow.mode,
+            menu_message_id=message.message_id,
+            fsm_state=flow.state_by_step[MenuStep.SUB_SEASON],
+            universe=clip_group.universe,
+            year=clip_group.year,
+            season=clip_group.season,
+        )
+        await _on_retrieve_select(
+            message=message,
+            state=state,
+            services=services,
+            settings=settings,
+            bot=bot,
+            callback_data=RetrieveCallbackData(
+                action=MenuAction.SELECT,
+                step=MenuStep.SUB_SEASON,
+                value=encode_sub_season(selected_sub_season),
+            ),
+            flow=flow,
+        )
+        return StepOutcome.SHOWN
     await show_fixed_option_menu(
         flow=flow,
         message=message,
@@ -599,7 +829,7 @@ async def _show_retrieve_sub_season_menu(
         option_value=encode_sub_season,
         option_text=lambda sub_season: sub_season.value.title(),
     )
-    return True
+    return StepOutcome.SHOWN
 
 
 async def _show_retrieve_scope_menu(
@@ -608,22 +838,56 @@ async def _show_retrieve_scope_menu(
     state: FSMContext,
     clip_group: ClipGroup,
     sub_season: SubSeason,
+    bot: Bot | None = None,
     services: Services,
     settings: Settings,
     flow: FlowMenuDefinition = _GET_FLOW,
     sub_groups: list[ClipSubGroup] | None = None,
-) -> bool:
+) -> StepOutcome:
+    data = await state.get_data()
     if sub_groups is None:
         sub_groups = await _retrieve_sub_groups(
             services=services,
             clip_group=clip_group,
         )
     if sub_groups is None:
-        return False
+        return StepOutcome.SKIP_BACK
 
     scopes = available_scopes(sub_groups, sub_season)
     if not scopes:
-        return False
+        return StepOutcome.SKIP_BACK
+    if len(scopes) == 1 and bot is not None:
+        selected_scope = scopes[0]
+        if (
+            selected_universe_year_season_sub_season(data)
+            == (clip_group.universe, clip_group.year, clip_group.season, sub_season)
+            and await state.get_state() == flow.state_by_step[MenuStep.SCOPE].state
+        ):
+            return StepOutcome.SKIP_BACK
+        await set_flow_context(
+            state=state,
+            mode=flow.mode,
+            menu_message_id=message.message_id,
+            fsm_state=flow.state_by_step[MenuStep.SCOPE],
+            universe=clip_group.universe,
+            year=clip_group.year,
+            season=clip_group.season,
+            sub_season=sub_season,
+        )
+        await _on_retrieve_select(
+            message=message,
+            state=state,
+            services=services,
+            settings=settings,
+            bot=bot,
+            callback_data=RetrieveCallbackData(
+                action=MenuAction.SELECT,
+                step=MenuStep.SCOPE,
+                value=selected_scope.value,
+            ),
+            flow=flow,
+        )
+        return StepOutcome.SHOWN
 
     available_scope_options: list[Scope | str] = [ALL_SCOPES_CALLBACK_VALUE, *scopes]
 
@@ -643,7 +907,7 @@ async def _show_retrieve_scope_menu(
         option_value=scope_option_callback_value,
         option_text=scope_option_text,
     )
-    return True
+    return StepOutcome.SHOWN
 
 
 async def _send_retrieve_scopes(

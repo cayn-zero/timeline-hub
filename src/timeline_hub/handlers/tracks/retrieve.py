@@ -1,4 +1,4 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import date
 from enum import StrEnum, auto
 from importlib.resources import files
@@ -28,6 +28,7 @@ from timeline_hub.handlers.menu import (
     validate_flow_state,
     width_reserved_text,
 )
+from timeline_hub.handlers.retrieve_common import StepOutcome
 from timeline_hub.services.container import Services
 from timeline_hub.services.track_store import (
     FetchedVariant,
@@ -44,10 +45,19 @@ from timeline_hub.settings import Settings
 from timeline_hub.types import Extension
 
 router = Router()
+type BackStep = Callable[[], Awaitable[StepOutcome]]
 _TRACK_GET_MODE = 'track_get'
 _TRACK_BACK_VALUE = 'back'
 _AUDIO_THUMBNAIL_NAME = 'track-thumbnail.jpg'
 _AUDIO_THUMBNAIL_BYTES = files('timeline_hub').joinpath(f'assets/{_AUDIO_THUMBNAIL_NAME}').read_bytes()
+
+
+async def _resolve_back_chain(*steps: BackStep, fallback: Callable[[], Awaitable[None]]) -> None:
+    """Try back targets in order and fall back only if all request skip-back."""
+    for step in steps:
+        if await step() is StepOutcome.SHOWN:
+            return
+    await fallback()
 
 
 class RetrieveEntryAction(StrEnum):
@@ -106,6 +116,7 @@ async def on_retrieve_entry(
     services: Services,
     settings: Settings,
     state: FSMContext,
+    bot: Bot | None = None,
 ) -> None:
     await callback.answer()
     message = callback_message(callback)
@@ -125,6 +136,8 @@ async def on_retrieve_entry(
     await _show_retrieve_universe_menu(
         message=message,
         state=state,
+        bot=bot,
+        services=services,
         settings=settings,
         groups=groups,
     )
@@ -159,6 +172,8 @@ async def on_retrieve_menu(
         await _on_retrieve_back(
             message=message,
             state=state,
+            bot=bot,
+            services=services,
             settings=settings,
             step=callback_data.step,
         )
@@ -178,6 +193,8 @@ async def _on_retrieve_back(
     *,
     message: Message,
     state: FSMContext,
+    bot: Bot,
+    services: Services,
     settings: Settings,
     step: TrackRetrieveStep,
 ) -> None:
@@ -191,38 +208,84 @@ async def _on_retrieve_back(
                 settings=settings,
             )
         case TrackRetrieveStep.YEAR:
-            if not await _show_retrieve_universe_menu(
-                message=message,
-                state=state,
-                settings=settings,
-            ):
-                await handle_stale_selection(message=message, state=state)
+            await _resolve_back_chain(
+                lambda: _show_retrieve_universe_menu(
+                    message=message,
+                    state=state,
+                    bot=bot,
+                    services=services,
+                    settings=settings,
+                ),
+                fallback=lambda: _show_retrieve_entry_menu(
+                    message=message,
+                    state=state,
+                    settings=settings,
+                ),
+            )
         case TrackRetrieveStep.SEASON:
             universe = _selected_universe(data)
             if universe is None:
                 await handle_stale_selection(message=message, state=state)
                 return
-            if not await _show_retrieve_year_menu(
-                message=message,
-                state=state,
-                universe=universe,
-                settings=settings,
-            ):
-                await handle_stale_selection(message=message, state=state)
+            await _resolve_back_chain(
+                lambda: _show_retrieve_year_menu(
+                    message=message,
+                    state=state,
+                    universe=universe,
+                    bot=bot,
+                    services=services,
+                    settings=settings,
+                ),
+                lambda: _show_retrieve_universe_menu(
+                    message=message,
+                    state=state,
+                    bot=bot,
+                    services=services,
+                    settings=settings,
+                ),
+                fallback=lambda: _show_retrieve_entry_menu(
+                    message=message,
+                    state=state,
+                    settings=settings,
+                ),
+            )
         case TrackRetrieveStep.SUB_SEASON:
             selection = _selected_universe_year(data)
             if selection is None:
                 await handle_stale_selection(message=message, state=state)
                 return
             universe, year = selection
-            if not await _show_retrieve_season_menu(
-                message=message,
-                state=state,
-                universe=universe,
-                year=year,
-                settings=settings,
-            ):
-                await handle_stale_selection(message=message, state=state)
+            await _resolve_back_chain(
+                lambda: _show_retrieve_season_menu(
+                    message=message,
+                    state=state,
+                    universe=universe,
+                    year=year,
+                    bot=bot,
+                    services=services,
+                    settings=settings,
+                ),
+                lambda: _show_retrieve_year_menu(
+                    message=message,
+                    state=state,
+                    universe=universe,
+                    bot=bot,
+                    services=services,
+                    settings=settings,
+                ),
+                lambda: _show_retrieve_universe_menu(
+                    message=message,
+                    state=state,
+                    bot=bot,
+                    services=services,
+                    settings=settings,
+                ),
+                fallback=lambda: _show_retrieve_entry_menu(
+                    message=message,
+                    state=state,
+                    settings=settings,
+                ),
+            )
 
 
 async def _on_retrieve_select(
@@ -242,11 +305,16 @@ async def _on_retrieve_select(
             if universe is None:
                 await handle_stale_selection(message=message, state=state)
                 return
-            if not await _show_retrieve_year_menu(
-                message=message,
-                state=state,
-                universe=universe,
-                settings=settings,
+            if (
+                await _show_retrieve_year_menu(
+                    message=message,
+                    state=state,
+                    universe=universe,
+                    bot=bot,
+                    services=services,
+                    settings=settings,
+                )
+                is StepOutcome.SKIP_BACK
             ):
                 await handle_stale_selection(message=message, state=state)
 
@@ -256,12 +324,17 @@ async def _on_retrieve_select(
             if universe is None or year is None:
                 await handle_stale_selection(message=message, state=state)
                 return
-            if not await _show_retrieve_season_menu(
-                message=message,
-                state=state,
-                universe=universe,
-                year=year,
-                settings=settings,
+            if (
+                await _show_retrieve_season_menu(
+                    message=message,
+                    state=state,
+                    universe=universe,
+                    year=year,
+                    bot=bot,
+                    services=services,
+                    settings=settings,
+                )
+                is StepOutcome.SKIP_BACK
             ):
                 await handle_stale_selection(message=message, state=state)
 
@@ -280,12 +353,17 @@ async def _on_retrieve_select(
                 await handle_stale_selection(message=message, state=state)
                 return
 
-            if not await _show_retrieve_sub_season_menu(
-                message=message,
-                state=state,
-                group=group,
-                tracks_by_sub_season=tracks_by_sub_season,
-                settings=settings,
+            if (
+                await _show_retrieve_sub_season_menu(
+                    message=message,
+                    state=state,
+                    group=group,
+                    bot=bot,
+                    services=services,
+                    tracks_by_sub_season=tracks_by_sub_season,
+                    settings=settings,
+                )
+                is StepOutcome.SKIP_BACK
             ):
                 await handle_stale_selection(message=message, state=state)
 
@@ -310,15 +388,40 @@ async def _show_retrieve_universe_menu(
     *,
     message: Message,
     state: FSMContext,
+    bot: Bot | None = None,
+    services: Services | None = None,
     settings: Settings,
     groups: list[TrackGroup] | None = None,
-) -> bool:
+) -> StepOutcome:
     if groups is None:
         groups = _groups_from_data(await state.get_data())
     if groups is None:
-        return False
+        return StepOutcome.SKIP_BACK
 
     universes = _available_universes(groups)
+    if len(universes) == 1 and bot is not None and services is not None:
+        selected_universe_value = universes[0]
+        if _selected_universe(await state.get_data()) is selected_universe_value:
+            return StepOutcome.SKIP_BACK
+        await _set_track_retrieve_context(
+            state=state,
+            fsm_state=TrackRetrieveFlow.universe,
+            menu_message_id=message.message_id,
+            groups=groups,
+        )
+        await _on_retrieve_select(
+            message=message,
+            state=state,
+            services=services,
+            settings=settings,
+            bot=bot,
+            callback_data=TrackRetrieveCallbackData(
+                action=TrackRetrieveAction.SELECT,
+                step=TrackRetrieveStep.UNIVERSE,
+                value=selected_universe_value.value,
+            ),
+        )
+        return StepOutcome.SHOWN
     await _set_track_retrieve_context(
         state=state,
         fsm_state=TrackRetrieveFlow.universe,
@@ -351,7 +454,7 @@ async def _show_retrieve_universe_menu(
             ),
         ),
     )
-    return True
+    return StepOutcome.SHOWN
 
 
 async def _show_retrieve_year_menu(
@@ -359,16 +462,42 @@ async def _show_retrieve_year_menu(
     message: Message,
     state: FSMContext,
     universe: TrackUniverse,
+    bot: Bot | None = None,
+    services: Services | None = None,
     settings: Settings,
-) -> bool:
+) -> StepOutcome:
     data = await state.get_data()
     groups = _groups_from_data(data)
     if groups is None:
-        return False
+        return StepOutcome.SKIP_BACK
 
     years = _available_years(groups, universe=universe)
     if not years:
-        return False
+        return StepOutcome.SKIP_BACK
+    if len(years) == 1 and bot is not None and services is not None:
+        selected_year = years[0]
+        if _selected_universe_year(data) == (universe, selected_year):
+            return StepOutcome.SKIP_BACK
+        await _set_track_retrieve_context(
+            state=state,
+            fsm_state=TrackRetrieveFlow.year,
+            menu_message_id=message.message_id,
+            groups=groups,
+            universe=universe,
+        )
+        await _on_retrieve_select(
+            message=message,
+            state=state,
+            services=services,
+            settings=settings,
+            bot=bot,
+            callback_data=TrackRetrieveCallbackData(
+                action=TrackRetrieveAction.SELECT,
+                step=TrackRetrieveStep.YEAR,
+                value=str(selected_year),
+            ),
+        )
+        return StepOutcome.SHOWN
     year_options = list(range(date.today().year, settings.min_clip_year - 1, -1))
 
     await _set_track_retrieve_context(
@@ -404,7 +533,7 @@ async def _show_retrieve_year_menu(
             ),
         ),
     )
-    return True
+    return StepOutcome.SHOWN
 
 
 async def _show_retrieve_season_menu(
@@ -413,16 +542,43 @@ async def _show_retrieve_season_menu(
     state: FSMContext,
     universe: TrackUniverse,
     year: int,
+    bot: Bot | None = None,
+    services: Services | None = None,
     settings: Settings,
-) -> bool:
+) -> StepOutcome:
     data = await state.get_data()
     groups = _groups_from_data(data)
     if groups is None:
-        return False
+        return StepOutcome.SKIP_BACK
 
     seasons = _available_seasons(groups, universe=universe, year=year)
     if not seasons:
-        return False
+        return StepOutcome.SKIP_BACK
+    if len(seasons) == 1 and bot is not None and services is not None:
+        selected_season = seasons[0]
+        if _selected_universe_year_season(data) == (universe, year, selected_season):
+            return StepOutcome.SKIP_BACK
+        await _set_track_retrieve_context(
+            state=state,
+            fsm_state=TrackRetrieveFlow.season,
+            menu_message_id=message.message_id,
+            groups=groups,
+            universe=universe,
+            year=year,
+        )
+        await _on_retrieve_select(
+            message=message,
+            state=state,
+            services=services,
+            settings=settings,
+            bot=bot,
+            callback_data=TrackRetrieveCallbackData(
+                action=TrackRetrieveAction.SELECT,
+                step=TrackRetrieveStep.SEASON,
+                value=str(int(selected_season)),
+            ),
+        )
+        return StepOutcome.SHOWN
 
     await _set_track_retrieve_context(
         state=state,
@@ -458,7 +614,7 @@ async def _show_retrieve_season_menu(
             ),
         ),
     )
-    return True
+    return StepOutcome.SHOWN
 
 
 async def _show_retrieve_sub_season_menu(
@@ -466,12 +622,44 @@ async def _show_retrieve_sub_season_menu(
     message: Message,
     state: FSMContext,
     group: TrackGroup,
+    bot: Bot | None = None,
+    services: Services | None = None,
     tracks_by_sub_season: Mapping[SubSeason, list[TrackInfo]],
     settings: Settings,
-) -> bool:
+) -> StepOutcome:
+    data = await state.get_data()
     sub_seasons = _available_sub_seasons(tracks_by_sub_season)
     if not sub_seasons:
-        return False
+        return StepOutcome.SKIP_BACK
+    if len(sub_seasons) == 1 and bot is not None and services is not None:
+        selected_sub_season = sub_seasons[0]
+        if (
+            _selected_universe_year_season(data) == (group.universe, group.year, group.season)
+            and await state.get_state() == TrackRetrieveFlow.sub_season.state
+        ):
+            return StepOutcome.SKIP_BACK
+        await _set_track_retrieve_context(
+            state=state,
+            fsm_state=TrackRetrieveFlow.sub_season,
+            menu_message_id=message.message_id,
+            universe=group.universe,
+            year=group.year,
+            season=group.season,
+            tracks_by_sub_season=tracks_by_sub_season,
+        )
+        await _on_retrieve_select(
+            message=message,
+            state=state,
+            services=services,
+            settings=settings,
+            bot=bot,
+            callback_data=TrackRetrieveCallbackData(
+                action=TrackRetrieveAction.SELECT,
+                step=TrackRetrieveStep.SUB_SEASON,
+                value=selected_sub_season.value,
+            ),
+        )
+        return StepOutcome.SHOWN
 
     await _set_track_retrieve_context(
         state=state,
@@ -508,7 +696,7 @@ async def _show_retrieve_sub_season_menu(
             ),
         ),
     )
-    return True
+    return StepOutcome.SHOWN
 
 
 async def _execute_track_get(
@@ -883,7 +1071,7 @@ def _variant_title(variant: FetchedVariant) -> str:
 
     if variant.level < 1:
         raise ValueError('Fetched track variant level must be >= 1')
-    return arrow * variant.level
+    return arrow * variant.level * 2
 
 
 def _variant_filename(variant: FetchedVariant, *, index: int) -> str:

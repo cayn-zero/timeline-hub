@@ -810,6 +810,49 @@ async def test_track_retrieve_entry_get_opens_universe_menu_with_existing_values
 
 
 @pytest.mark.asyncio
+async def test_track_retrieve_entry_auto_skips_single_universe_when_bot_is_available() -> None:
+    message = _fake_message(text='Tracks', message_id=15)
+    callback = _fake_callback(message)
+    state = _FakeState()
+    group_west_2024 = track_store_module.TrackGroup(
+        universe=track_store_module.TrackUniverse.WEST,
+        year=2024,
+        season=track_store_module.Season.S1,
+    )
+    group_west_2025 = track_store_module.TrackGroup(
+        universe=track_store_module.TrackUniverse.WEST,
+        year=2025,
+        season=track_store_module.Season.S2,
+    )
+    track_store = _RetrieveTrackStore(
+        groups=[group_west_2024, group_west_2025],
+        tracks_by_group={},
+    )
+    services = _services(clip_store=SimpleNamespace(), track_store=track_store)
+    settings = _settings()
+
+    await on_tracks_retrieve_entry(
+        callback,
+        TracksRetrieveEntryCallbackData(action=TracksRetrieveEntryAction.GET),
+        services,
+        settings,
+        state,
+        AsyncMock(),
+    )
+
+    _assert_format_kwargs(
+        message.edit_text.await_args.kwargs,
+        _selected_kwargs('Get', 'West', prompt='Select year:', message_width=settings.message_width),
+    )
+    assert _keyboard_rows(message.edit_text.await_args.kwargs['reply_markup']) == [
+        [DUMMY_BUTTON_TEXT, DUMMY_BUTTON_TEXT],
+        [DUMMY_BUTTON_TEXT, '2024', '2025'],
+        ['Back'],
+    ]
+    assert state.current_state == TrackRetrieveFlow.year.state
+
+
+@pytest.mark.asyncio
 async def test_on_retrieve_entry_edits_to_no_clips_stored_when_empty() -> None:
     message = _fake_message(text='Clips', message_id=10)
     callback = _fake_callback(message)
@@ -836,6 +879,45 @@ async def test_on_retrieve_entry_edits_to_no_clips_stored_when_empty() -> None:
     services.clip_store.list_groups.assert_awaited_once()
     assert state.current_state == RetrieveClipFlow.universe.state
     assert state.clear_count == 1
+
+
+@pytest.mark.asyncio
+async def test_clip_retrieve_entry_auto_skips_single_universe_when_bot_is_available() -> None:
+    message = _fake_message(text='Select action:', message_id=111)
+    callback = _fake_callback(message)
+    state = _FakeState()
+    services = _services(
+        clip_store=SimpleNamespace(
+            list_groups=AsyncMock(
+                return_value=[
+                    ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
+                    ClipGroup(universe=Universe.WEST, year=2024, season=Season.S1),
+                ]
+            )
+        )
+    )
+
+    await on_retrieve_entry(
+        callback,
+        RetrieveEntryCallbackData(action=RetrieveEntryAction.GET),
+        services,
+        _settings(),
+        state,
+        AsyncMock(),
+    )
+
+    _assert_format_kwargs(
+        message.edit_text.await_args.kwargs,
+        _selected_kwargs('Get', 'West', prompt='Select year:', message_width=35),
+    )
+    reply_markup = message.edit_text.await_args.kwargs['reply_markup']
+    _assert_three_rows(reply_markup)
+    assert _keyboard_rows(reply_markup) == [
+        [DUMMY_BUTTON_TEXT, DUMMY_BUTTON_TEXT],
+        [DUMMY_BUTTON_TEXT, '2024', '2025'],
+        ['Back'],
+    ]
+    assert state.current_state == RetrieveClipFlow.year.state
 
 
 @pytest.mark.asyncio
@@ -946,30 +1028,6 @@ async def test_track_retrieve_flow_shows_only_existing_year_season_and_sub_seaso
             action=TrackRetrieveAction.SELECT,
             step=TrackRetrieveStep.UNIVERSE,
             value=track_store_module.TrackUniverse.WEST.value,
-        ),
-        AsyncMock(),
-        services,
-        settings,
-        state,
-    )
-
-    _assert_format_kwargs(
-        message.edit_text.await_args.kwargs,
-        _selected_kwargs('Get', 'West', prompt='Select year:', message_width=settings.message_width),
-    )
-    assert _keyboard_rows(message.edit_text.await_args.kwargs['reply_markup']) == [
-        [DUMMY_BUTTON_TEXT, DUMMY_BUTTON_TEXT],
-        [DUMMY_BUTTON_TEXT, '2024', DUMMY_BUTTON_TEXT],
-        ['Back'],
-    ]
-    assert state.current_state == TrackRetrieveFlow.year.state
-
-    await on_tracks_retrieve_menu(
-        callback,
-        TrackRetrieveCallbackData(
-            action=TrackRetrieveAction.SELECT,
-            step=TrackRetrieveStep.YEAR,
-            value='2024',
         ),
         AsyncMock(),
         services,
@@ -1105,6 +1163,58 @@ async def test_track_retrieve_back_from_season_returns_to_year_menu() -> None:
         ['Back'],
     ]
     assert state.current_state == TrackRetrieveFlow.year.state
+
+
+@pytest.mark.asyncio
+async def test_track_retrieve_back_from_season_skips_single_year_to_universe_menu() -> None:
+    message = _fake_message(text='Select season:', message_id=18)
+    callback = _fake_callback(message)
+    state = _FakeState()
+    groups = [
+        track_store_module.TrackGroup(
+            universe=track_store_module.TrackUniverse.WEST,
+            year=2024,
+            season=track_store_module.Season.S1,
+        ),
+        track_store_module.TrackGroup(
+            universe=track_store_module.TrackUniverse.WEST,
+            year=2024,
+            season=track_store_module.Season.S2,
+        ),
+    ]
+    await state.set_state(TrackRetrieveFlow.season)
+    await state.update_data(
+        mode=track_retrieve_module._TRACK_GET_MODE,
+        menu_message_id=18,
+        groups=groups,
+        universe=track_store_module.TrackUniverse.WEST,
+        year=2024,
+    )
+
+    await on_tracks_retrieve_menu(
+        callback,
+        TrackRetrieveCallbackData(
+            action=TrackRetrieveAction.BACK,
+            step=TrackRetrieveStep.SEASON,
+            value='back',
+        ),
+        AsyncMock(),
+        _services(clip_store=SimpleNamespace(), track_store=SimpleNamespace()),
+        _settings(),
+        state,
+    )
+
+    _assert_one_line_button_message(
+        text=message.edit_text.await_args.kwargs['text'],
+        real_line='Select action:',
+        message_width=35,
+    )
+    assert _keyboard_rows(message.edit_text.await_args.kwargs['reply_markup']) == [
+        ['Get'],
+        [DUMMY_BUTTON_TEXT],
+        ['Cancel'],
+    ]
+    assert state.current_state is None
 
 
 @pytest.mark.asyncio
@@ -1267,7 +1377,7 @@ async def test_track_retrieve_sub_season_selection_fetches_all_before_sending_an
                         'thumbnail_filename': 'track-thumbnail.jpg',
                         'thumbnail_data': thumbnail_bytes,
                         'performer': '\u2009',
-                        'title': '⏩⏩',
+                        'title': '⏩⏩⏩⏩',
                     },
                     {
                         'filename': f'2{Extension.OPUS.suffix}',
@@ -1275,7 +1385,7 @@ async def test_track_retrieve_sub_season_selection_fetches_all_before_sending_an
                         'thumbnail_filename': 'track-thumbnail.jpg',
                         'thumbnail_data': thumbnail_bytes,
                         'performer': '\u2009',
-                        'title': '⏪',
+                        'title': '⏪⏪',
                     },
                 ],
             },
@@ -1289,7 +1399,7 @@ async def test_track_retrieve_sub_season_selection_fetches_all_before_sending_an
                 'thumbnail_filename': 'track-thumbnail.jpg',
                 'thumbnail_data': thumbnail_bytes,
                 'performer': '\u2009',
-                'title': '⏩⏩⏩',
+                'title': '⏩⏩⏩⏩⏩⏩',
             },
         ),
         (
@@ -1310,7 +1420,7 @@ async def test_track_retrieve_sub_season_selection_fetches_all_before_sending_an
                 'thumbnail_filename': 'track-thumbnail.jpg',
                 'thumbnail_data': thumbnail_bytes,
                 'performer': '\u2009',
-                'title': '⏪',
+                'title': '⏪⏪',
             },
         ),
     ]
@@ -4642,6 +4752,44 @@ async def test_retrieve_back_from_season_keeps_year_slots_and_top_right_priority
     ]
     services.clip_store.list_groups.assert_not_awaited()
     assert state.current_state == RetrieveClipFlow.year.state
+
+
+@pytest.mark.asyncio
+async def test_clip_retrieve_back_from_season_skips_single_year_to_universe_menu() -> None:
+    message = _fake_message(message_id=11)
+    callback = _fake_callback(message)
+    state = _FakeState()
+    await state.set_state(RetrieveClipFlow.season)
+    groups = [
+        ClipGroup(universe=Universe.WEST, year=2025, season=Season.S1),
+        ClipGroup(universe=Universe.WEST, year=2025, season=Season.S2),
+    ]
+    await state.update_data(mode='get', menu_message_id=11, universe=Universe.WEST, year=2025, groups=groups)
+    services = _services(clip_store=SimpleNamespace(list_groups=AsyncMock(return_value=groups)))
+
+    await on_retrieve_menu(
+        callback,
+        RetrieveCallbackData(action=MenuAction.BACK, step=MenuStep.SEASON, value='back'),
+        AsyncMock(),
+        services,
+        _settings(),
+        state,
+    )
+
+    _assert_one_line_button_message(
+        text=message.edit_text.await_args.kwargs['text'],
+        real_line='Select action:',
+        message_width=35,
+    )
+    reply_markup = message.edit_text.await_args.kwargs['reply_markup']
+    _assert_three_rows(reply_markup)
+    assert _keyboard_rows(reply_markup) == [
+        ['Get'],
+        ['Pull'],
+        ['Cancel'],
+    ]
+    services.clip_store.list_groups.assert_not_awaited()
+    assert state.current_state is None
 
 
 @pytest.mark.asyncio
