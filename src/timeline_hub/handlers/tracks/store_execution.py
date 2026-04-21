@@ -53,12 +53,23 @@ async def prepare_tracks_from_buffer(*, bot: Bot, messages: Sequence[Message]) -
         )
 
         try:
-            cover_jpg = to_jpg(cover_bytes)
+            # Detect JPEG via magic bytes (Telegram photos do not provide filename).
+            if len(cover_bytes) >= 3 and cover_bytes.startswith(b'\xff\xd8\xff'):
+                # Fast-path: avoid re-encoding already-JPG input.
+                cover_jpg = cover_bytes
+            else:
+                cover_jpg = to_jpg(cover_bytes)
         except Exception as error:
             raise TrackInputError("Can't process cover image") from error
 
         try:
-            audio_opus = await to_opus(audio_bytes)
+            # Best-effort extension parse (filename may be missing or invalid).
+            audio_extension = Extension.try_from_filename(audio.file_name)
+            if audio_extension is Extension.OPUS:
+                # Fast-path: avoid re-encoding already-Opus input.
+                audio_opus = audio_bytes
+            else:
+                audio_opus = await to_opus(audio_bytes)
         except Exception as error:
             raise TrackInputError("Can't process audio") from error
 

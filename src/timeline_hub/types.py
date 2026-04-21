@@ -48,6 +48,15 @@ class Extension(StrEnum):
 
         return cls.from_string(suffix)
 
+    @classmethod
+    def try_from_filename(cls, filename: str | None) -> Self | None:
+        if not filename:
+            return None
+        try:
+            return cls.from_filename(filename)
+        except InvalidExtensionError:
+            return None
+
 
 @dataclass(frozen=True, slots=True)
 class FileBytes:

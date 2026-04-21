@@ -2134,6 +2134,96 @@ async def test_track_store_happy_path_stores_all_prepared_tracks_in_order(monkey
 
 
 @pytest.mark.asyncio
+async def test_prepare_tracks_from_buffer_skips_to_opus_for_opus_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    messages = [
+        _fake_message(chat_id=42, message_id=1, photo=_fake_photo(file_id='photo-1'), caption='Artist\nTitle'),
+        _fake_message(chat_id=42, message_id=2, audio=_fake_audio(file_id='audio-1', file_name='track.opus')),
+    ]
+    bot = SimpleNamespace(
+        get_file=AsyncMock(
+            side_effect=[
+                SimpleNamespace(file_path='photo-path-1'),
+                SimpleNamespace(file_path='audio-path-1'),
+            ]
+        ),
+        download_file=AsyncMock(
+            side_effect=[
+                BytesIO(b'cover-1'),
+                BytesIO(b'already-opus'),
+            ]
+        ),
+    )
+    to_opus = AsyncMock()
+    monkeypatch.setattr(track_store_execution_module, 'to_jpg', Mock(return_value=b'jpg-1'))
+    monkeypatch.setattr(track_store_execution_module, 'to_opus', to_opus)
+
+    prepared_tracks = await track_store_execution_module.prepare_tracks_from_buffer(
+        bot=bot,
+        messages=messages,
+    )
+
+    assert prepared_tracks == [
+        track_store_module.Track(
+            artists=('Artist',),
+            title='Title',
+            cover=FileBytes(data=b'jpg-1', extension=Extension.JPG),
+            audio=FileBytes(data=b'already-opus', extension=Extension.OPUS),
+        )
+    ]
+    to_opus.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prepare_tracks_from_buffer_skips_to_jpg_for_jpg_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cover_bytes = b'\xff\xd8\xffrest...'
+    messages = [
+        _fake_message(
+            chat_id=42,
+            message_id=1,
+            photo=[SimpleNamespace(file_id='photo-1')],
+            caption='Artist\nTitle',
+        ),
+        _fake_message(chat_id=42, message_id=2, audio=_fake_audio(file_id='audio-1', file_name='track.mp3')),
+    ]
+    bot = SimpleNamespace(
+        get_file=AsyncMock(
+            side_effect=[
+                SimpleNamespace(file_path='photo-path-1'),
+                SimpleNamespace(file_path='audio-path-1'),
+            ]
+        ),
+        download_file=AsyncMock(
+            side_effect=[
+                BytesIO(cover_bytes),
+                BytesIO(b'source-audio'),
+            ]
+        ),
+    )
+    to_jpg = Mock()
+    monkeypatch.setattr(track_store_execution_module, 'to_jpg', to_jpg)
+    monkeypatch.setattr(track_store_execution_module, 'to_opus', AsyncMock(return_value=b'opus-1'))
+
+    prepared_tracks = await track_store_execution_module.prepare_tracks_from_buffer(
+        bot=bot,
+        messages=messages,
+    )
+
+    assert prepared_tracks == [
+        track_store_module.Track(
+            artists=('Artist',),
+            title='Title',
+            cover=FileBytes(data=cover_bytes, extension=Extension.JPG),
+            audio=FileBytes(data=b'opus-1', extension=Extension.OPUS),
+        )
+    ]
+    to_jpg.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_track_store_preserves_message_id_order_even_if_buffer_out_of_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
