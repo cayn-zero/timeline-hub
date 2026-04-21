@@ -3,7 +3,7 @@ from io import BytesIO
 import pytest
 from PIL import Image
 
-from timeline_hub.infra.images import to_jpg
+from timeline_hub.infra.images import normalize_cover_to_jpg, to_jpg
 
 
 def test_to_jpg_rejects_empty_input() -> None:
@@ -54,11 +54,71 @@ def test_to_jpg_applies_exif_orientation() -> None:
         assert bottom_pixel[1] > bottom_pixel[0]
 
 
-def _build_png_bytes(*, mode: str) -> bytes:
+def test_normalize_cover_to_jpg_returns_original_bytes_for_small_jpeg() -> None:
+    jpeg_bytes = _build_jpeg_bytes(size=(640, 640))
+
+    normalized_bytes = normalize_cover_to_jpg(jpeg_bytes)
+
+    assert normalized_bytes == jpeg_bytes
+
+
+def test_normalize_cover_to_jpg_resizes_large_jpeg_without_upscaling_width_ratio() -> None:
+    jpeg_bytes = _build_jpeg_bytes(size=(1500, 2000))
+
+    normalized_bytes = normalize_cover_to_jpg(jpeg_bytes)
+
+    assert normalized_bytes != jpeg_bytes
+    assert normalized_bytes.startswith(b'\xff\xd8\xff')
+    with Image.open(BytesIO(normalized_bytes)) as image:
+        image.load()
+        assert image.format == 'JPEG'
+        assert image.size == (960, 1280)
+
+
+def test_normalize_cover_to_jpg_converts_small_png_without_upscaling() -> None:
+    png_bytes = _build_png_bytes(mode='RGB', size=(600, 800))
+
+    normalized_bytes = normalize_cover_to_jpg(png_bytes)
+
+    assert normalized_bytes.startswith(b'\xff\xd8\xff')
+    with Image.open(BytesIO(normalized_bytes)) as image:
+        image.load()
+        assert image.format == 'JPEG'
+        assert image.size == (600, 800)
+
+
+def test_normalize_cover_to_jpg_converts_and_clips_tall_png() -> None:
+    png_bytes = _build_png_bytes(mode='RGBA', size=(900, 1800))
+
+    normalized_bytes = normalize_cover_to_jpg(png_bytes)
+
+    assert normalized_bytes.startswith(b'\xff\xd8\xff')
+    with Image.open(BytesIO(normalized_bytes)) as image:
+        image.load()
+        assert image.format == 'JPEG'
+        assert image.mode == 'RGB'
+        assert image.size == (640, 1280)
+
+
+def _build_png_bytes(*, mode: str, size: tuple[int, int] = (4, 4)) -> bytes:
     color = (10, 20, 30) if mode == 'RGB' else (10, 20, 30, 0)
-    image = Image.new(mode, (4, 4), color)
+    image = Image.new(mode, size, color)
     output = BytesIO()
     image.save(output, format='PNG')
+    return output.getvalue()
+
+
+def _build_jpeg_bytes(*, size: tuple[int, int]) -> bytes:
+    image = Image.new('RGB', size, (10, 20, 30))
+    output = BytesIO()
+    image.save(
+        output,
+        format='JPEG',
+        quality=95,
+        subsampling=0,
+        optimize=True,
+        progressive=True,
+    )
     return output.getvalue()
 
 

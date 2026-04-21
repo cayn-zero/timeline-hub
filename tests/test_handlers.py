@@ -1366,7 +1366,7 @@ async def test_track_retrieve_sub_season_selection_fetches_all_before_sending_an
                         'data': b'second-main-1',
                         'thumbnail_filename': 'track-thumbnail.jpg',
                         'thumbnail_data': thumbnail_bytes,
-                        'performer': '\u2009',
+                        'performer': '\u00a0',
                         'title': '⏩⏩⏩⏩',
                     },
                     {
@@ -1374,7 +1374,7 @@ async def test_track_retrieve_sub_season_selection_fetches_all_before_sending_an
                         'data': b'second-main-2',
                         'thumbnail_filename': 'track-thumbnail.jpg',
                         'thumbnail_data': thumbnail_bytes,
-                        'performer': '\u2009',
+                        'performer': '\u00a0',
                         'title': '⏪⏪',
                     },
                 ],
@@ -1388,7 +1388,7 @@ async def test_track_retrieve_sub_season_selection_fetches_all_before_sending_an
                 'data': b'second-inst',
                 'thumbnail_filename': 'track-thumbnail.jpg',
                 'thumbnail_data': thumbnail_bytes,
-                'performer': '\u2009',
+                'performer': '\u00a0',
                 'title': '⏩⏩⏩⏩⏩⏩',
             },
         ),
@@ -1409,7 +1409,7 @@ async def test_track_retrieve_sub_season_selection_fetches_all_before_sending_an
                 'data': b'first-main',
                 'thumbnail_filename': 'track-thumbnail.jpg',
                 'thumbnail_data': thumbnail_bytes,
-                'performer': '\u2009',
+                'performer': '\u00a0',
                 'title': '⏪⏪',
             },
         ),
@@ -2076,7 +2076,11 @@ async def test_track_store_happy_path_stores_all_prepared_tracks_in_order(monkey
             ]
         ),
     )
-    monkeypatch.setattr(track_store_execution_module, 'to_jpg', Mock(side_effect=[b'jpg-1', b'jpg-2']))
+    monkeypatch.setattr(
+        track_store_execution_module,
+        'normalize_cover_to_jpg',
+        Mock(side_effect=[b'jpg-1', b'jpg-2']),
+    )
     monkeypatch.setattr(track_store_execution_module, 'to_opus', AsyncMock(side_effect=[b'opus-1', b'opus-2']))
 
     await on_track_intake_action(
@@ -2156,7 +2160,7 @@ async def test_prepare_tracks_from_buffer_skips_to_opus_for_opus_input(
         ),
     )
     to_opus = AsyncMock()
-    monkeypatch.setattr(track_store_execution_module, 'to_jpg', Mock(return_value=b'jpg-1'))
+    monkeypatch.setattr(track_store_execution_module, 'normalize_cover_to_jpg', Mock(return_value=b'jpg-1'))
     monkeypatch.setattr(track_store_execution_module, 'to_opus', to_opus)
 
     prepared_tracks = await track_store_execution_module.prepare_tracks_from_buffer(
@@ -2176,10 +2180,10 @@ async def test_prepare_tracks_from_buffer_skips_to_opus_for_opus_input(
 
 
 @pytest.mark.asyncio
-async def test_prepare_tracks_from_buffer_skips_to_jpg_for_jpg_input(
+async def test_prepare_tracks_from_buffer_normalizes_cover_via_image_infra(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cover_bytes = b'\xff\xd8\xffrest...'
+    cover_bytes = b'cover-bytes'
     messages = [
         _fake_message(
             chat_id=42,
@@ -2203,8 +2207,8 @@ async def test_prepare_tracks_from_buffer_skips_to_jpg_for_jpg_input(
             ]
         ),
     )
-    to_jpg = Mock()
-    monkeypatch.setattr(track_store_execution_module, 'to_jpg', to_jpg)
+    normalize_cover_to_jpg = Mock(return_value=b'normalized-cover')
+    monkeypatch.setattr(track_store_execution_module, 'normalize_cover_to_jpg', normalize_cover_to_jpg)
     monkeypatch.setattr(track_store_execution_module, 'to_opus', AsyncMock(return_value=b'opus-1'))
 
     prepared_tracks = await track_store_execution_module.prepare_tracks_from_buffer(
@@ -2216,11 +2220,11 @@ async def test_prepare_tracks_from_buffer_skips_to_jpg_for_jpg_input(
         track_store_module.Track(
             artists=('Artist',),
             title='Title',
-            cover=FileBytes(data=cover_bytes, extension=Extension.JPG),
+            cover=FileBytes(data=b'normalized-cover', extension=Extension.JPG),
             audio=FileBytes(data=b'opus-1', extension=Extension.OPUS),
         )
     ]
-    to_jpg.assert_not_called()
+    normalize_cover_to_jpg.assert_called_once_with(cover_bytes)
 
 
 @pytest.mark.asyncio
@@ -2258,7 +2262,11 @@ async def test_track_store_preserves_message_id_order_even_if_buffer_out_of_orde
             ]
         ),
     )
-    monkeypatch.setattr(track_store_execution_module, 'to_jpg', Mock(side_effect=[b'jpg-1', b'jpg-2']))
+    monkeypatch.setattr(
+        track_store_execution_module,
+        'normalize_cover_to_jpg',
+        Mock(side_effect=[b'jpg-1', b'jpg-2']),
+    )
     monkeypatch.setattr(track_store_execution_module, 'to_opus', AsyncMock(side_effect=[b'opus-1', b'opus-2']))
 
     await on_track_intake_action(
@@ -2419,7 +2427,7 @@ async def test_track_store_mid_batch_preprocessing_failure_prevents_partial_stor
         ),
         download_file=AsyncMock(side_effect=[BytesIO(b'cover-1'), BytesIO(b'audio-1')]),
     )
-    monkeypatch.setattr(track_store_execution_module, 'to_jpg', Mock(return_value=b'jpg-1'))
+    monkeypatch.setattr(track_store_execution_module, 'normalize_cover_to_jpg', Mock(return_value=b'jpg-1'))
     monkeypatch.setattr(track_store_execution_module, 'to_opus', AsyncMock(return_value=b'opus-1'))
 
     await on_track_intake_action(
@@ -2497,7 +2505,11 @@ async def test_track_store_partial_failure_reports_stored_titles_and_flushes_buf
             ]
         ),
     )
-    monkeypatch.setattr(track_store_execution_module, 'to_jpg', Mock(side_effect=[b'jpg-1', b'jpg-2']))
+    monkeypatch.setattr(
+        track_store_execution_module,
+        'normalize_cover_to_jpg',
+        Mock(side_effect=[b'jpg-1', b'jpg-2']),
+    )
     monkeypatch.setattr(track_store_execution_module, 'to_opus', AsyncMock(side_effect=[b'opus-1', b'opus-2']))
     log_exception = Mock()
     monkeypatch.setattr(track_ingest_module.logger, 'exception', log_exception)

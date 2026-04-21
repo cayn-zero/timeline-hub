@@ -4,7 +4,7 @@ from aiogram import Bot
 from aiogram.types import Message
 
 from timeline_hub.infra.ffmpeg import to_opus
-from timeline_hub.infra.images import to_jpg
+from timeline_hub.infra.images import normalize_cover_to_jpg
 from timeline_hub.services.track_store import Track
 from timeline_hub.types import Extension, FileBytes
 
@@ -53,12 +53,7 @@ async def prepare_tracks_from_buffer(*, bot: Bot, messages: Sequence[Message]) -
         )
 
         try:
-            # Detect JPEG via magic bytes (Telegram photos do not provide filename).
-            if len(cover_bytes) >= 3 and cover_bytes.startswith(b'\xff\xd8\xff'):
-                # Fast-path: avoid re-encoding already-JPG input.
-                cover_jpg = cover_bytes
-            else:
-                cover_jpg = to_jpg(cover_bytes)
+            cover_jpg = normalize_cover_to_jpg(cover_bytes)
         except Exception as error:
             raise TrackInputError("Can't process cover image") from error
 
