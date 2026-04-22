@@ -132,8 +132,8 @@ def _default_track_preset() -> Preset:
         name='Default',
         slowed=PresetMode(step=0.08, levels=3),
         sped_up=PresetMode(step=0.06, levels=3),
-        reverb_start=0.02,
-        reverb_step=0.02,
+        reverb_start=0.01,
+        reverb_step=0.01,
     )
 
 
