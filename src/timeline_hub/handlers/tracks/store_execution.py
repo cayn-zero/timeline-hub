@@ -13,6 +13,15 @@ class TrackInputError(ValueError):
     pass
 
 
+def extract_store_messages(messages: Sequence[Message]) -> list[Message]:
+    """Return store-relevant messages in original order."""
+    return [message for message in messages if message.photo is not None or message.audio is not None]
+
+
+def track_count_from_store_messages(messages: Sequence[Message]) -> int:
+    return len(extract_store_messages(messages)) // 2
+
+
 def validate_track_batch(messages: Sequence[Message]) -> list[tuple[tuple[str, ...], str]]:
     if len(messages) < 2 or len(messages) % 2 != 0:
         raise TrackInputError("Can't dispatch input")
@@ -26,17 +35,21 @@ def validate_track_batch(messages: Sequence[Message]) -> list[tuple[tuple[str, .
         if photo_message.caption is None or not photo_message.caption.strip():
             raise TrackInputError("Can't dispatch input")
 
-        parsed_tracks.append(_caption_to_artists_and_title(photo_message.caption))
+        try:
+            parsed_tracks.append(_caption_to_artists_and_title(photo_message.caption))
+        except TrackInputError as error:
+            raise TrackInputError("Can't dispatch input") from error
 
     return parsed_tracks
 
 
 async def prepare_tracks_from_buffer(*, bot: Bot, messages: Sequence[Message]) -> list[Track]:
-    parsed_tracks = validate_track_batch(messages)
+    store_messages = extract_store_messages(messages)
+    parsed_tracks = validate_track_batch(store_messages)
     prepared_tracks: list[Track] = []
-    for parsed_track, index in zip(parsed_tracks, range(0, len(messages), 2), strict=True):
-        photo_message = messages[index]
-        audio_message = messages[index + 1]
+    for parsed_track, index in zip(parsed_tracks, range(0, len(store_messages), 2), strict=True):
+        photo_message = store_messages[index]
+        audio_message = store_messages[index + 1]
         photo = photo_message.photo
         audio = audio_message.audio
         if photo is None or audio is None:

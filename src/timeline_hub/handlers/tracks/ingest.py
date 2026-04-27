@@ -14,7 +14,6 @@ from loguru import logger
 from timeline_hub.handlers.menu import (
     back_button,
     callback_message,
-    create_padding_line,
     dummy_button,
     fixed_option_keyboard,
     handle_stale_selection,
@@ -22,8 +21,13 @@ from timeline_hub.handlers.menu import (
     selection_text,
     stacked_keyboard,
     validate_flow_state,
+    width_reserved_text,
 )
-from timeline_hub.handlers.tracks.store_execution import TrackInputError, prepare_tracks_from_buffer
+from timeline_hub.handlers.tracks.store_execution import (
+    TrackInputError,
+    prepare_tracks_from_buffer,
+    track_count_from_store_messages,
+)
 from timeline_hub.services.container import Services
 from timeline_hub.services.track_store import Season, SubSeason, TrackGroup, TrackUniverse
 from timeline_hub.settings import Settings
@@ -223,13 +227,12 @@ async def try_dispatch_track_intake(
     settings: Settings,
 ) -> bool:
     buffered_messages = services.chat_message_buffer.peek_flat(message.chat.id)
-    track_count = len(buffered_messages) // 2
+    track_count = track_count_from_store_messages(buffered_messages)
     if track_count == 0:
         return False
 
     await message.answer(
         **_track_intake_menu_kwargs(
-            track_count=track_count,
             message_width=settings.message_width,
             buffer_version=services.chat_message_buffer.version(message.chat.id),
         )
@@ -239,16 +242,11 @@ async def try_dispatch_track_intake(
 
 def _track_intake_menu_kwargs(
     *,
-    track_count: int,
     message_width: int,
     buffer_version: int,
 ) -> dict[str, Any]:
     return {
-        **Text(
-            create_padding_line(message_width),
-            '\n',
-            Text('Tracks: ', Bold(str(track_count))),
-        ).as_kwargs(),
+        **width_reserved_text(text='', message_width=message_width),
         'reply_markup': stacked_keyboard(
             buttons=[
                 InlineKeyboardButton(
@@ -281,7 +279,6 @@ async def _show_track_intake_action_menu(
     await state.clear()
     await message.edit_text(
         **_track_intake_menu_kwargs(
-            track_count=len(services.chat_message_buffer.peek_flat(message.chat.id)) // 2,
             message_width=settings.message_width,
             buffer_version=services.chat_message_buffer.version(message.chat.id),
         )
