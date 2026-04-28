@@ -132,3 +132,72 @@ def test_explicit_grouping_after_flush_uses_requested_chat_only() -> None:
     assert buffer.peek_raw(200) == [chat_b_1, chat_b_2]
     assert buffer.flush(200) is None
     assert buffer.version(200) == 3
+
+
+def test_append_duplicate_message_id_in_same_chat_ignores_duplicate_and_version_bumps_once() -> None:
+    buffer = ChatMessageBuffer()
+    first = _message(10, chat_id=100)
+    duplicate = _message(10, chat_id=100)
+
+    buffer.append(first, chat_id=100)
+    buffer.append(duplicate, chat_id=100)
+
+    assert buffer.peek_raw(100) == [first]
+    assert buffer.version(100) == 1
+
+
+def test_append_duplicate_message_id_in_same_chat_preserves_original_message() -> None:
+    buffer = ChatMessageBuffer()
+    original = _message(20, chat_id=100, media_group_id='g1')
+    duplicate_different_content = _message(20, chat_id=100, media_group_id='g2')
+
+    buffer.append(original, chat_id=100)
+    buffer.append(duplicate_different_content, chat_id=100)
+
+    assert buffer.peek_raw(100) == [original]
+    assert buffer.peek_raw(100)[0].media_group_id == 'g1'
+    assert buffer.version(100) == 1
+
+
+def test_append_same_message_id_in_different_chats_is_independent() -> None:
+    buffer = ChatMessageBuffer()
+    chat_a = _message(30, chat_id=100)
+    chat_b = _message(30, chat_id=200)
+
+    buffer.append(chat_a, chat_id=100)
+    buffer.append(chat_b, chat_id=200)
+
+    assert buffer.peek_raw(100) == [chat_a]
+    assert buffer.peek_raw(200) == [chat_b]
+    assert buffer.version(100) == 1
+    assert buffer.version(200) == 1
+
+
+def test_peek_views_do_not_contain_duplicates_after_duplicate_append() -> None:
+    buffer = ChatMessageBuffer()
+    m2 = _message(2, chat_id=100, media_group_id='g')
+    m1 = _message(1, chat_id=100, media_group_id='g')
+    m2_duplicate = _message(2, chat_id=100, media_group_id='other')
+
+    buffer.append(m2, chat_id=100)
+    buffer.append(m1, chat_id=100)
+    buffer.append(m2_duplicate, chat_id=100)
+
+    assert buffer.peek_flat(100) == [m1, m2]
+    assert buffer.peek_grouped(100) == [(m1, m2)]
+    assert buffer.version(100) == 2
+
+
+def test_duplicate_append_after_flush_is_allowed_and_bumps_version() -> None:
+    buffer = ChatMessageBuffer()
+    message = _message(40, chat_id=100)
+    same_message_id_after_flush = _message(40, chat_id=100)
+
+    buffer.append(message, chat_id=100)
+    assert buffer.version(100) == 1
+    assert buffer.flush(100) is None
+    assert buffer.version(100) == 2
+
+    buffer.append(same_message_id_after_flush, chat_id=100)
+    assert buffer.peek_raw(100) == [same_message_id_after_flush]
+    assert buffer.version(100) == 3

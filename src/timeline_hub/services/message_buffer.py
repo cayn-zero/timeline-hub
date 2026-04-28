@@ -27,7 +27,10 @@ class ChatMessageBuffer:
         self._versions: dict[ChatId, int] = {}
 
     def append(self, message: Message, *, chat_id: ChatId) -> None:
-        self._messages.setdefault(chat_id, []).append(message)
+        messages = self._messages.setdefault(chat_id, [])
+        if any(existing.message_id == message.message_id for existing in messages):
+            return
+        messages.append(message)
         self._bump_version(chat_id)
 
     def peek_raw(self, chat_id: ChatId) -> Messages:
