@@ -59,7 +59,11 @@ from timeline_hub.handlers.clips.retrieve import (
     on_retrieve_menu,
 )
 from timeline_hub.handlers.clips.route_planning import parse_route_text
-from timeline_hub.handlers.intake import on_buffered_relevant_message
+from timeline_hub.handlers.intake import (
+    IntakeFallbackCallbackData,
+    on_buffered_relevant_message,
+    on_intake_fallback_cancel,
+)
 from timeline_hub.handlers.menu import (
     DUMMY_BUTTON_TEXT,
     create_padding_line,
@@ -1735,7 +1739,7 @@ async def test_video_and_audio_batch_is_rejected_and_flushed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_audio_before_photo_is_rejected_and_flushed() -> None:
+async def test_audio_before_photo_dispatches_to_track_menu() -> None:
     scheduler = _FakeScheduler()
     buffer = ChatMessageBuffer()
     services = _services(clip_store=SimpleNamespace(), scheduler=scheduler, buffer=buffer)
@@ -1748,8 +1752,16 @@ async def test_audio_before_photo_is_rejected_and_flushed() -> None:
 
     await scheduler.job()
 
-    message.answer.assert_awaited_once_with(text="Can't dispatch")
-    assert services.chat_message_buffer.peek_raw(42) == []
+    expected = Text(
+        create_padding_line(_settings().message_width),
+        '\n',
+        Text('Messages: ', Bold('2')),
+    ).as_kwargs()
+    _assert_format_kwargs(message.answer.await_args.kwargs, expected)
+    reply_markup = message.answer.await_args.kwargs['reply_markup']
+    _assert_three_rows(reply_markup)
+    assert _keyboard_rows(reply_markup) == [['Store'], [DUMMY_BUTTON_TEXT], ['Cancel']]
+    assert [buffered_message.message_id for buffered_message in services.chat_message_buffer.peek_raw(42)] == [1, 2]
 
 
 @pytest.mark.asyncio
@@ -1846,12 +1858,19 @@ async def test_audio_only_batch_is_rejected_and_flushed() -> None:
 
     await scheduler.job()
 
-    message.answer.assert_awaited_once_with(text="Can't dispatch")
-    assert services.chat_message_buffer.peek_raw(42) == []
+    expected = Text(
+        create_padding_line(_settings().message_width),
+        '\n',
+        Text('Messages: ', Bold('2')),
+    ).as_kwargs()
+    _assert_format_kwargs(message.answer.await_args.kwargs, expected)
+    reply_markup = message.answer.await_args.kwargs['reply_markup']
+    assert _keyboard_rows(reply_markup) == [['Cancel']]
+    assert [buffered_message.message_id for buffered_message in services.chat_message_buffer.peek_raw(42)] == [1, 2]
 
 
 @pytest.mark.asyncio
-async def test_photo_only_batch_is_rejected_and_flushed() -> None:
+async def test_photo_only_batch_dispatches_to_track_menu() -> None:
     scheduler = _FakeScheduler()
     buffer = ChatMessageBuffer()
     services = _services(clip_store=SimpleNamespace(), scheduler=scheduler, buffer=buffer)
@@ -1864,8 +1883,39 @@ async def test_photo_only_batch_is_rejected_and_flushed() -> None:
 
     await scheduler.job()
 
-    message.answer.assert_awaited_once_with(text="Can't dispatch")
-    assert services.chat_message_buffer.peek_raw(42) == []
+    expected = Text(
+        create_padding_line(_settings().message_width),
+        '\n',
+        Text('Messages: ', Bold('2')),
+    ).as_kwargs()
+    _assert_format_kwargs(message.answer.await_args.kwargs, expected)
+    reply_markup = message.answer.await_args.kwargs['reply_markup']
+    _assert_three_rows(reply_markup)
+    assert _keyboard_rows(reply_markup) == [['Store'], [DUMMY_BUTTON_TEXT], ['Cancel']]
+    assert [buffered_message.message_id for buffered_message in services.chat_message_buffer.peek_raw(42)] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_photo_only_single_message_shows_fallback_menu() -> None:
+    scheduler = _FakeScheduler()
+    buffer = ChatMessageBuffer()
+    services = _services(clip_store=SimpleNamespace(), scheduler=scheduler, buffer=buffer)
+    message = _fake_message(chat_id=42, message_id=1, photo=[object()], caption='Artist\nTitle')
+
+    await on_buffered_relevant_message(message, services, _settings())
+    assert scheduler.job is not None
+
+    await scheduler.job()
+
+    expected = Text(
+        create_padding_line(_settings().message_width),
+        '\n',
+        Text('Messages: ', Bold('1')),
+    ).as_kwargs()
+    _assert_format_kwargs(message.answer.await_args.kwargs, expected)
+    reply_markup = message.answer.await_args.kwargs['reply_markup']
+    assert _keyboard_rows(reply_markup) == [['Cancel']]
+    assert [buffered_message.message_id for buffered_message in services.chat_message_buffer.peek_raw(42)] == [1]
 
 
 @pytest.mark.asyncio
@@ -1935,7 +1985,32 @@ async def test_photo_text_audio_dispatches_to_track_menu() -> None:
 
 
 @pytest.mark.asyncio
-async def test_text_only_buffered_batch_is_rejected_and_flushed() -> None:
+async def test_photo_and_text_batch_dispatches_to_track_menu() -> None:
+    scheduler = _FakeScheduler()
+    buffer = ChatMessageBuffer()
+    services = _services(clip_store=SimpleNamespace(), scheduler=scheduler, buffer=buffer)
+    settings = _settings()
+    first_message = _fake_message(chat_id=42, message_id=1, photo=[object()], caption='Artist\nTitle')
+    message = _fake_message(chat_id=42, message_id=2, text='note')
+
+    await on_buffered_relevant_message(first_message, services, settings)
+    await on_buffered_relevant_message(message, services, settings)
+    assert scheduler.job is not None
+
+    await scheduler.job()
+
+    expected = Text(
+        create_padding_line(settings.message_width),
+        '\n',
+        Text('Messages: ', Bold('2')),
+    ).as_kwargs()
+    _assert_format_kwargs(message.answer.await_args.kwargs, expected)
+    reply_markup = message.answer.await_args.kwargs['reply_markup']
+    assert _keyboard_rows(reply_markup) == [['Store'], [DUMMY_BUTTON_TEXT], ['Cancel']]
+
+
+@pytest.mark.asyncio
+async def test_text_only_buffered_batch_shows_fallback_menu() -> None:
     scheduler = _FakeScheduler()
     buffer = ChatMessageBuffer()
     services = _services(clip_store=SimpleNamespace(), scheduler=scheduler, buffer=buffer)
@@ -1950,8 +2025,15 @@ async def test_text_only_buffered_batch_is_rejected_and_flushed() -> None:
 
     await scheduler.job()
 
-    message.answer.assert_awaited_once_with(text="Can't dispatch")
-    assert services.chat_message_buffer.peek_raw(42) == []
+    expected = Text(
+        create_padding_line(_settings().message_width),
+        '\n',
+        Text('Messages: ', Bold('1')),
+    ).as_kwargs()
+    _assert_format_kwargs(message.answer.await_args.kwargs, expected)
+    reply_markup = message.answer.await_args.kwargs['reply_markup']
+    assert _keyboard_rows(reply_markup) == [['Cancel']]
+    assert [buffered_message.message_id for buffered_message in services.chat_message_buffer.peek_raw(42)] == [1]
 
 
 @pytest.mark.asyncio
@@ -1973,7 +2055,7 @@ async def test_try_dispatch_clip_intake_returns_false_without_videos() -> None:
 
 
 @pytest.mark.asyncio
-async def test_try_dispatch_track_intake_returns_false_without_audio() -> None:
+async def test_try_dispatch_track_intake_shows_menu_without_audio() -> None:
     message = _fake_message(chat_id=42, message_id=1, text='note')
     buffer = ChatMessageBuffer()
     buffer.append(message, chat_id=42)
@@ -1985,9 +2067,69 @@ async def test_try_dispatch_track_intake_returns_false_without_audio() -> None:
         settings=_settings(),
     )
 
-    assert handled is False
-    message.answer.assert_not_awaited()
+    assert handled is True
+    _assert_format_kwargs(
+        message.answer.await_args.kwargs,
+        {
+            **Text(
+                create_padding_line(_settings().message_width),
+                '\n',
+                Text('Messages: ', Bold('1')),
+            ).as_kwargs(),
+            'reply_markup': message.answer.await_args.kwargs['reply_markup'],
+        },
+    )
+    assert _keyboard_rows(message.answer.await_args.kwargs['reply_markup']) == [
+        ['Store'],
+        [DUMMY_BUTTON_TEXT],
+        ['Cancel'],
+    ]
     assert [buffered_message.message_id for buffered_message in services.chat_message_buffer.peek_raw(42)] == [1]
+
+
+@pytest.mark.asyncio
+async def test_fallback_cancel_flushes_buffer() -> None:
+    buffer = ChatMessageBuffer()
+    buffered_message = _fake_message(chat_id=42, message_id=1, text='note')
+    buffer.append(buffered_message, chat_id=42)
+    services = _services(clip_store=SimpleNamespace(), buffer=buffer)
+    menu_message = _fake_message(chat_id=42, message_id=10, text='Messages: 1')
+    callback = _fake_callback(menu_message)
+    state = _FakeState()
+
+    await on_intake_fallback_cancel(
+        callback,
+        IntakeFallbackCallbackData(action='cancel', buffer_version=buffer.version(42)),
+        services,
+        state,
+    )
+
+    callback.answer.assert_awaited_once()
+    menu_message.edit_text.assert_awaited_once_with('Canceled', reply_markup=None)
+    assert services.chat_message_buffer.peek_raw(42) == []
+
+
+@pytest.mark.asyncio
+async def test_fallback_cancel_stale_does_not_flush_newer_buffer() -> None:
+    buffer = ChatMessageBuffer()
+    buffer.append(_fake_message(chat_id=42, message_id=1, text='note'), chat_id=42)
+    rendered_version = buffer.version(42)
+    buffer.append(_fake_message(chat_id=42, message_id=2, text='newer'), chat_id=42)
+    services = _services(clip_store=SimpleNamespace(), buffer=buffer)
+    menu_message = _fake_message(chat_id=42, message_id=11, text='Messages: 1')
+    callback = _fake_callback(menu_message)
+    state = _FakeState()
+
+    await on_intake_fallback_cancel(
+        callback,
+        IntakeFallbackCallbackData(action='cancel', buffer_version=rendered_version),
+        services,
+        state,
+    )
+
+    callback.answer.assert_awaited_once()
+    menu_message.edit_text.assert_awaited_once_with('Selection is no longer available', reply_markup=None)
+    assert [buffered_message.message_id for buffered_message in services.chat_message_buffer.peek_raw(42)] == [1, 2]
 
 
 @pytest.mark.asyncio

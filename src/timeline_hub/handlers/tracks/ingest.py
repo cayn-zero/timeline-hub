@@ -26,7 +26,6 @@ from timeline_hub.handlers.menu import (
 from timeline_hub.handlers.tracks.store_execution import (
     TrackInputError,
     prepare_tracks_from_buffer,
-    track_count_from_store_messages,
 )
 from timeline_hub.services.container import Services
 from timeline_hub.services.track_store import Season, SubSeason, TrackGroup, TrackUniverse
@@ -226,16 +225,11 @@ async def try_dispatch_track_intake(
     services: Services,
     settings: Settings,
 ) -> bool:
-    buffered_messages = services.chat_message_buffer.peek_flat(message.chat.id)
-    track_count = track_count_from_store_messages(buffered_messages)
-    if track_count == 0:
-        return False
-
     await message.answer(
         **_track_intake_menu_kwargs(
             message_width=settings.message_width,
             buffer_version=services.chat_message_buffer.version(message.chat.id),
-            message_count=len(buffered_messages),
+            message_count=len(services.chat_message_buffer.peek_flat(message.chat.id)),
         )
     )
     return True
