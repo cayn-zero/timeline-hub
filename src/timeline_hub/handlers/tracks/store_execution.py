@@ -5,12 +5,81 @@ from aiogram.types import Message
 
 from timeline_hub.infra.ffmpeg import to_opus
 from timeline_hub.infra.images import normalize_cover_to_jpg
-from timeline_hub.services.track_store import Track
+from timeline_hub.services.track_store import Track, TrackGroup, TrackId, TrackStore
 from timeline_hub.types import Extension, FileBytes
 
 
 class TrackInputError(ValueError):
     pass
+
+
+def extract_single_photo_audio_messages(messages: Sequence[Message]) -> tuple[Message, Message]:
+    """Return exactly one photo message and one audio message, order-independent."""
+    if len(messages) != 2:
+        raise TrackInputError('Invalid input')
+
+    photo_messages = [message for message in messages if message.photo is not None]
+    audio_messages = [message for message in messages if message.audio is not None]
+    if len(photo_messages) != 1 or len(audio_messages) != 1:
+        raise TrackInputError('Invalid input')
+    return photo_messages[0], audio_messages[0]
+
+
+def extract_track_identity_from_photo_message(photo_message: Message) -> tuple[TrackGroup, TrackId]:
+    """Decode linked-dot cover caption identity into `(group, track_id)`."""
+    caption = photo_message.caption
+    if caption is None or not caption or caption[0] != '·':
+        raise TrackInputError('Invalid input')
+
+    entities = photo_message.caption_entities
+    if not entities:
+        raise TrackInputError('Invalid input')
+
+    link_url: str | None = None
+    for entity in entities:
+        entity_type = getattr(entity, 'type', None)
+        if getattr(entity_type, 'value', entity_type) != 'text_link':
+            continue
+        if getattr(entity, 'offset', None) != 0 or getattr(entity, 'length', None) != 1:
+            continue
+        link_url = getattr(entity, 'url', None)
+        break
+
+    if not link_url or not isinstance(link_url, str):
+        raise TrackInputError('Invalid input')
+    if not link_url.startswith('https://'):
+        raise TrackInputError('Invalid input')
+
+    identity = link_url.removeprefix('https://')
+    if identity.endswith('.com/'):
+        identity = identity.removesuffix('.com/')
+    elif identity.endswith('.com'):
+        identity = identity.removesuffix('.com')
+    else:
+        raise TrackInputError('Invalid input')
+
+    if not identity:
+        raise TrackInputError('Invalid input')
+    return TrackStore.string_to_track_identity(identity)
+
+
+async def prepare_audio_from_message(*, bot: Bot, audio_message: Message) -> FileBytes:
+    """Download one audio message and normalize to OPUS `FileBytes`."""
+    audio = audio_message.audio
+    if audio is None:
+        raise TrackInputError('Invalid input')
+
+    audio_bytes = await _download_file_bytes(bot=bot, file_id=audio.file_id)
+    try:
+        audio_extension = Extension.try_from_filename(audio.file_name)
+        if audio_extension is Extension.OPUS:
+            audio_opus = audio_bytes
+        else:
+            audio_opus = await to_opus(audio_bytes)
+    except Exception as error:
+        raise TrackInputError("Can't process audio") from error
+
+    return FileBytes(data=audio_opus, extension=Extension.OPUS)
 
 
 def extract_store_messages(messages: Sequence[Message]) -> list[Message]:

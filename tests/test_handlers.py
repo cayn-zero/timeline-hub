@@ -439,6 +439,7 @@ def _fake_message(
     message_id: int = 1,
     text: str | None = None,
     caption: str | None = None,
+    caption_entities=None,
     audio=None,
     photo=None,
     video=None,
@@ -453,7 +454,7 @@ def _fake_message(
         photo=photo,
         media_group_id=media_group_id,
         caption=caption,
-        caption_entities=None,
+        caption_entities=caption_entities,
     )
     message.answer = AsyncMock()
     message.edit_text = AsyncMock()
@@ -473,10 +474,31 @@ def _fake_photo(*, file_id: str) -> list[SimpleNamespace]:
     return [SimpleNamespace(file_id=file_id)]
 
 
-def _fake_callback(message) -> SimpleNamespace:
+def _fake_callback(message, *, bot: object | None = None) -> SimpleNamespace:
     callback = SimpleNamespace(message=message)
     callback.answer = AsyncMock()
+    if bot is not None:
+        callback.bot = bot
     return callback
+
+
+def _linked_dot_entity(url: str) -> SimpleNamespace:
+    return SimpleNamespace(type='text_link', offset=0, length=1, url=url)
+
+
+def _tracks_by_sub_season_with_id(
+    track_id: str,
+) -> dict[track_store_module.SubSeason, list[track_store_module.TrackInfo]]:
+    return {
+        track_store_module.SubSeason.A: [
+            track_store_module.TrackInfo(
+                id=track_id,
+                artists=('Artist',),
+                title='Title',
+                has_instrumental=False,
+            )
+        ]
+    }
 
 
 def _keyboard_rows(reply_markup) -> list[list[str]]:
@@ -1666,7 +1688,7 @@ async def test_valid_photo_audio_pairs_dispatch_to_track_menu() -> None:
     _assert_format_kwargs(message.answer.await_args.kwargs, expected)
     reply_markup = message.answer.await_args.kwargs['reply_markup']
     _assert_three_rows(reply_markup)
-    assert _keyboard_rows(reply_markup) == [['Store'], [DUMMY_BUTTON_TEXT], ['Cancel']]
+    assert _keyboard_rows(reply_markup) == [['Store'], ['Instrumental', 'Track'], ['Cancel']]
     assert [buffered_message.message_id for buffered_message in services.chat_message_buffer.peek_raw(42)] == [
         1,
         2,
@@ -1710,7 +1732,7 @@ async def test_valid_out_of_order_appended_track_batch_dispatches_in_message_ord
     _assert_format_kwargs(message.answer.await_args.kwargs, expected)
     reply_markup = message.answer.await_args.kwargs['reply_markup']
     _assert_three_rows(reply_markup)
-    assert _keyboard_rows(reply_markup) == [['Store'], [DUMMY_BUTTON_TEXT], ['Cancel']]
+    assert _keyboard_rows(reply_markup) == [['Store'], ['Instrumental', 'Track'], ['Cancel']]
     assert [buffered_message.message_id for buffered_message in services.chat_message_buffer.peek_raw(42)] == [
         2,
         1,
@@ -1760,7 +1782,7 @@ async def test_audio_before_photo_dispatches_to_track_menu() -> None:
     _assert_format_kwargs(message.answer.await_args.kwargs, expected)
     reply_markup = message.answer.await_args.kwargs['reply_markup']
     _assert_three_rows(reply_markup)
-    assert _keyboard_rows(reply_markup) == [['Store'], [DUMMY_BUTTON_TEXT], ['Cancel']]
+    assert _keyboard_rows(reply_markup) == [['Store'], ['Instrumental', 'Track'], ['Cancel']]
     assert [buffered_message.message_id for buffered_message in services.chat_message_buffer.peek_raw(42)] == [1, 2]
 
 
@@ -1787,7 +1809,7 @@ async def test_photo_without_caption_dispatches_to_track_menu() -> None:
     _assert_format_kwargs(message.answer.await_args.kwargs, expected)
     reply_markup = message.answer.await_args.kwargs['reply_markup']
     _assert_three_rows(reply_markup)
-    assert _keyboard_rows(reply_markup) == [['Store'], [DUMMY_BUTTON_TEXT], ['Cancel']]
+    assert _keyboard_rows(reply_markup) == [['Store'], ['Instrumental', 'Track'], ['Cancel']]
 
 
 @pytest.mark.asyncio
@@ -1813,7 +1835,7 @@ async def test_single_line_caption_dispatches_to_track_menu() -> None:
     _assert_format_kwargs(message.answer.await_args.kwargs, expected)
     reply_markup = message.answer.await_args.kwargs['reply_markup']
     _assert_three_rows(reply_markup)
-    assert _keyboard_rows(reply_markup) == [['Store'], [DUMMY_BUTTON_TEXT], ['Cancel']]
+    assert _keyboard_rows(reply_markup) == [['Store'], ['Instrumental', 'Track'], ['Cancel']]
 
 
 @pytest.mark.asyncio
@@ -1841,7 +1863,7 @@ async def test_odd_number_of_track_candidate_messages_dispatches_to_track_menu()
     _assert_format_kwargs(message.answer.await_args.kwargs, expected)
     reply_markup = message.answer.await_args.kwargs['reply_markup']
     _assert_three_rows(reply_markup)
-    assert _keyboard_rows(reply_markup) == [['Store'], [DUMMY_BUTTON_TEXT], ['Cancel']]
+    assert _keyboard_rows(reply_markup) == [['Store'], ['Instrumental', 'Track'], ['Cancel']]
 
 
 @pytest.mark.asyncio
@@ -1891,7 +1913,7 @@ async def test_photo_only_batch_dispatches_to_track_menu() -> None:
     _assert_format_kwargs(message.answer.await_args.kwargs, expected)
     reply_markup = message.answer.await_args.kwargs['reply_markup']
     _assert_three_rows(reply_markup)
-    assert _keyboard_rows(reply_markup) == [['Store'], [DUMMY_BUTTON_TEXT], ['Cancel']]
+    assert _keyboard_rows(reply_markup) == [['Store'], ['Instrumental', 'Track'], ['Cancel']]
     assert [buffered_message.message_id for buffered_message in services.chat_message_buffer.peek_raw(42)] == [1, 2]
 
 
@@ -1981,7 +2003,7 @@ async def test_photo_text_audio_dispatches_to_track_menu() -> None:
     _assert_format_kwargs(message.answer.await_args.kwargs, expected)
     reply_markup = message.answer.await_args.kwargs['reply_markup']
     _assert_three_rows(reply_markup)
-    assert _keyboard_rows(reply_markup) == [['Store'], [DUMMY_BUTTON_TEXT], ['Cancel']]
+    assert _keyboard_rows(reply_markup) == [['Store'], ['Instrumental', 'Track'], ['Cancel']]
 
 
 @pytest.mark.asyncio
@@ -2006,7 +2028,7 @@ async def test_photo_and_text_batch_dispatches_to_track_menu() -> None:
     ).as_kwargs()
     _assert_format_kwargs(message.answer.await_args.kwargs, expected)
     reply_markup = message.answer.await_args.kwargs['reply_markup']
-    assert _keyboard_rows(reply_markup) == [['Store'], [DUMMY_BUTTON_TEXT], ['Cancel']]
+    assert _keyboard_rows(reply_markup) == [['Store'], ['Instrumental', 'Track'], ['Cancel']]
 
 
 @pytest.mark.asyncio
@@ -2081,7 +2103,7 @@ async def test_try_dispatch_track_intake_shows_menu_without_audio() -> None:
     )
     assert _keyboard_rows(message.answer.await_args.kwargs['reply_markup']) == [
         ['Store'],
-        [DUMMY_BUTTON_TEXT],
+        ['Instrumental', 'Track'],
         ['Cancel'],
     ]
     assert [buffered_message.message_id for buffered_message in services.chat_message_buffer.peek_raw(42)] == [1]
@@ -2180,7 +2202,7 @@ async def test_try_dispatch_track_intake_shows_menu_with_multiple_pairs() -> Non
     )
     assert _keyboard_rows(message.answer.await_args.kwargs['reply_markup']) == [
         ['Store'],
-        [DUMMY_BUTTON_TEXT],
+        ['Instrumental', 'Track'],
         ['Cancel'],
     ]
     assert [buffered_message.message_id for buffered_message in services.chat_message_buffer.peek_raw(42)] == [
@@ -2189,6 +2211,685 @@ async def test_try_dispatch_track_intake_shows_menu_with_multiple_pairs() -> Non
         3,
         4,
     ]
+
+
+@pytest.mark.asyncio
+async def test_track_replace_action_updates_track_audio_and_flushes_buffer(monkeypatch: pytest.MonkeyPatch) -> None:
+    group = track_store_module.TrackGroup(
+        universe=track_store_module.TrackUniverse.WEST,
+        year=2026,
+        season=track_store_module.Season.S1,
+    )
+    track_id = _CLIP_ID_1
+    identity = track_store_module.TrackStore.track_identity_to_string(group, track_id)
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(
+            chat_id=42,
+            message_id=1,
+            photo=_fake_photo(file_id='photo-1'),
+            caption='·Title',
+            caption_entities=[_linked_dot_entity(f'https://{identity}.com')],
+        ),
+        chat_id=42,
+    )
+    buffer.append(
+        _fake_message(
+            chat_id=42,
+            message_id=2,
+            audio=_fake_audio(file_id='audio-1', file_name='one.mp3'),
+        ),
+        chat_id=42,
+    )
+    track_store = SimpleNamespace(
+        list_tracks=AsyncMock(return_value=_tracks_by_sub_season_with_id(track_id)),
+        update=AsyncMock(),
+    )
+    services = _services(clip_store=SimpleNamespace(), track_store=track_store, buffer=buffer)
+    message = _fake_message(text='Select action:', chat_id=42, message_id=15)
+    state = _FakeState()
+    bot = SimpleNamespace(
+        get_file=AsyncMock(return_value=SimpleNamespace(file_path='audio-path-1')),
+        download_file=AsyncMock(return_value=BytesIO(b'audio-1')),
+    )
+    monkeypatch.setattr(track_store_execution_module, 'to_opus', AsyncMock(return_value=b'opus-1'))
+
+    await on_track_intake_action(
+        _fake_callback(message, bot=bot),
+        TrackIntakeActionCallbackData(action=TrackIntakeAction.TRACK, buffer_version=buffer.version(42)),
+        state,
+        services,
+        _settings(),
+    )
+
+    track_store.update.assert_awaited_once_with(
+        group,
+        track_id,
+        track=FileBytes(data=b'opus-1', extension=Extension.OPUS),
+    )
+    assert 'instrumental' not in track_store.update.await_args.kwargs
+    _assert_format_kwargs(
+        message.edit_text.await_args_list[0].kwargs,
+        _selected_kwargs('Track', 'West', '2026', '1'),
+    )
+    assert message.edit_text.await_args_list[0].kwargs['reply_markup'] is None
+    message.answer.assert_awaited_once_with('Done')
+    assert services.chat_message_buffer.peek_raw(42) == []
+
+
+@pytest.mark.asyncio
+async def test_track_replace_action_updates_instrumental_and_flushes_buffer(monkeypatch: pytest.MonkeyPatch) -> None:
+    group = track_store_module.TrackGroup(
+        universe=track_store_module.TrackUniverse.WEST,
+        year=2026,
+        season=track_store_module.Season.S1,
+    )
+    track_id = _CLIP_ID_1
+    identity = track_store_module.TrackStore.track_identity_to_string(group, track_id)
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(
+            chat_id=42,
+            message_id=1,
+            photo=_fake_photo(file_id='photo-1'),
+            caption='·Title',
+            caption_entities=[_linked_dot_entity(f'https://{identity}.com/')],
+        ),
+        chat_id=42,
+    )
+    buffer.append(
+        _fake_message(
+            chat_id=42,
+            message_id=2,
+            audio=_fake_audio(file_id='audio-1', file_name='one.mp3'),
+        ),
+        chat_id=42,
+    )
+    track_store = SimpleNamespace(
+        list_tracks=AsyncMock(return_value=_tracks_by_sub_season_with_id(track_id)),
+        update=AsyncMock(),
+    )
+    services = _services(clip_store=SimpleNamespace(), track_store=track_store, buffer=buffer)
+    message = _fake_message(text='Select action:', chat_id=42, message_id=15)
+    state = _FakeState()
+    bot = SimpleNamespace(
+        get_file=AsyncMock(return_value=SimpleNamespace(file_path='audio-path-1')),
+        download_file=AsyncMock(return_value=BytesIO(b'audio-1')),
+    )
+    monkeypatch.setattr(track_store_execution_module, 'to_opus', AsyncMock(return_value=b'opus-1'))
+
+    await on_track_intake_action(
+        _fake_callback(message, bot=bot),
+        TrackIntakeActionCallbackData(action=TrackIntakeAction.INSTRUMENTAL, buffer_version=buffer.version(42)),
+        state,
+        services,
+        _settings(),
+    )
+
+    track_store.update.assert_awaited_once_with(
+        group,
+        track_id,
+        instrumental=FileBytes(data=b'opus-1', extension=Extension.OPUS),
+    )
+    assert 'track' not in track_store.update.await_args.kwargs
+    _assert_format_kwargs(
+        message.edit_text.await_args_list[0].kwargs,
+        _selected_kwargs('Instrumental', 'West', '2026', '1'),
+    )
+    assert message.edit_text.await_args_list[0].kwargs['reply_markup'] is None
+    message.answer.assert_awaited_once_with('Done')
+    assert services.chat_message_buffer.peek_raw(42) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('photo_first', [True, False])
+async def test_track_replace_action_accepts_photo_audio_in_any_order(
+    photo_first: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = track_store_module.TrackGroup(
+        universe=track_store_module.TrackUniverse.WEST,
+        year=2026,
+        season=track_store_module.Season.S1,
+    )
+    track_id = _CLIP_ID_2
+    identity = track_store_module.TrackStore.track_identity_to_string(group, track_id)
+    photo_message = _fake_message(
+        chat_id=42,
+        message_id=1,
+        photo=_fake_photo(file_id='photo-1'),
+        caption='·Title',
+        caption_entities=[_linked_dot_entity(f'https://{identity}.com')],
+    )
+    audio_message = _fake_message(
+        chat_id=42,
+        message_id=2,
+        audio=_fake_audio(file_id='audio-1', file_name='one.mp3'),
+    )
+    buffer = ChatMessageBuffer()
+    for item in [photo_message, audio_message] if photo_first else [audio_message, photo_message]:
+        buffer.append(item, chat_id=42)
+    track_store = SimpleNamespace(
+        list_tracks=AsyncMock(return_value=_tracks_by_sub_season_with_id(track_id)),
+        update=AsyncMock(),
+    )
+    services = _services(clip_store=SimpleNamespace(), track_store=track_store, buffer=buffer)
+    message = _fake_message(text='Select action:', chat_id=42, message_id=15)
+    state = _FakeState()
+    bot = SimpleNamespace(
+        get_file=AsyncMock(return_value=SimpleNamespace(file_path='audio-path-1')),
+        download_file=AsyncMock(return_value=BytesIO(b'audio-1')),
+    )
+    monkeypatch.setattr(track_store_execution_module, 'to_opus', AsyncMock(return_value=b'opus-1'))
+
+    await on_track_intake_action(
+        _fake_callback(message, bot=bot),
+        TrackIntakeActionCallbackData(action=TrackIntakeAction.TRACK, buffer_version=buffer.version(42)),
+        state,
+        services,
+        _settings(),
+    )
+
+    track_store.update.assert_awaited_once()
+    assert services.chat_message_buffer.peek_raw(42) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'messages',
+    [
+        [
+            _fake_message(chat_id=42, message_id=1, photo=_fake_photo(file_id='photo-1'), caption='·Title'),
+        ],
+        [
+            _fake_message(chat_id=42, message_id=1, audio=_fake_audio(file_id='audio-1', file_name='one.mp3')),
+        ],
+        [
+            _fake_message(chat_id=42, message_id=1, photo=_fake_photo(file_id='photo-1'), caption='·Title'),
+            _fake_message(chat_id=42, message_id=2, audio=_fake_audio(file_id='audio-1', file_name='one.mp3')),
+            _fake_message(chat_id=42, message_id=3, text='extra'),
+        ],
+        [
+            _fake_message(chat_id=42, message_id=1, photo=_fake_photo(file_id='photo-1'), caption='·Title'),
+            _fake_message(chat_id=42, message_id=2, audio=_fake_audio(file_id='audio-1', file_name='one.mp3')),
+            _fake_message(chat_id=42, message_id=3, audio=_fake_audio(file_id='audio-2', file_name='two.mp3')),
+        ],
+        [
+            _fake_message(chat_id=42, message_id=1, photo=_fake_photo(file_id='photo-1'), caption='·Title'),
+            _fake_message(chat_id=42, message_id=2, photo=_fake_photo(file_id='photo-2'), caption='·Title'),
+            _fake_message(chat_id=42, message_id=3, audio=_fake_audio(file_id='audio-1', file_name='one.mp3')),
+        ],
+    ],
+)
+async def test_track_replace_action_invalid_exact_input_invalidates(messages: list[Message]) -> None:
+    buffer = ChatMessageBuffer()
+    for buffered_message in messages:
+        buffer.append(buffered_message, chat_id=42)
+    track_store = SimpleNamespace(update=AsyncMock())
+    services = _services(clip_store=SimpleNamespace(), track_store=track_store, buffer=buffer)
+    message = _fake_message(text='Select action:', chat_id=42, message_id=15)
+    state = _FakeState()
+
+    await on_track_intake_action(
+        _fake_callback(message, bot=SimpleNamespace()),
+        TrackIntakeActionCallbackData(action=TrackIntakeAction.TRACK, buffer_version=buffer.version(42)),
+        state,
+        services,
+        _settings(),
+    )
+
+    track_store.update.assert_not_awaited()
+    message.edit_text.assert_awaited_with('Invalid input', reply_markup=None)
+    assert services.chat_message_buffer.peek_raw(42) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('caption', 'caption_entities'),
+    [
+        (None, [_linked_dot_entity('https://west-2026-1--018f05c1f1a37b348d291f53a1c9d0e1.com')]),
+        ('Title', [_linked_dot_entity('https://west-2026-1--018f05c1f1a37b348d291f53a1c9d0e1.com')]),
+        ('·Title', None),
+        ('·Title', [SimpleNamespace(type='text_link', offset=1, length=1, url='https://x.com')]),
+        ('·Title', [SimpleNamespace(type='text_link', offset=0, length=1, url=None)]),
+        ('·Title', [_linked_dot_entity('http://west-2026-1--018f05c1f1a37b348d291f53a1c9d0e1.com')]),
+        ('·Title', [_linked_dot_entity('https://west-2026-1--018f05c1f1a37b348d291f53a1c9d0e1.net')]),
+        ('·Title', [_linked_dot_entity('https://not-valid.com')]),
+    ],
+)
+async def test_track_replace_action_invalid_photo_identity_invalidates(
+    caption: str | None,
+    caption_entities: list[SimpleNamespace] | None,
+) -> None:
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(
+            chat_id=42,
+            message_id=1,
+            photo=_fake_photo(file_id='photo-1'),
+            caption=caption,
+            caption_entities=caption_entities,
+        ),
+        chat_id=42,
+    )
+    buffer.append(
+        _fake_message(
+            chat_id=42,
+            message_id=2,
+            audio=_fake_audio(file_id='audio-1', file_name='one.mp3'),
+        ),
+        chat_id=42,
+    )
+    track_store = SimpleNamespace(update=AsyncMock())
+    services = _services(clip_store=SimpleNamespace(), track_store=track_store, buffer=buffer)
+    message = _fake_message(text='Select action:', chat_id=42, message_id=15)
+    state = _FakeState()
+
+    await on_track_intake_action(
+        _fake_callback(message, bot=SimpleNamespace()),
+        TrackIntakeActionCallbackData(action=TrackIntakeAction.TRACK, buffer_version=buffer.version(42)),
+        state,
+        services,
+        _settings(),
+    )
+
+    track_store.update.assert_not_awaited()
+    message.edit_text.assert_awaited_with('Invalid input', reply_markup=None)
+    assert services.chat_message_buffer.peek_raw(42) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'update_error',
+    [
+        track_store_module.TrackGroupNotFoundError(
+            universe=track_store_module.TrackUniverse.WEST,
+            year=2026,
+            season=track_store_module.Season.S1,
+            sub_season=None,
+        ),
+        ValueError('Track id 018f05c1f1a37b348d291f53a1c9d0e1 does not exist in group west-2026-1'),
+        track_store_module.TrackInvalidAudioFormatError('Audio sample rate must be 48000 Hz, got 44100'),
+    ],
+)
+async def test_track_replace_action_expected_update_failures_map_to_invalid_input(
+    update_error: Exception,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = track_store_module.TrackGroup(
+        universe=track_store_module.TrackUniverse.WEST,
+        year=2026,
+        season=track_store_module.Season.S1,
+    )
+    track_id = _CLIP_ID_1
+    identity = track_store_module.TrackStore.track_identity_to_string(group, track_id)
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(
+            chat_id=42,
+            message_id=1,
+            photo=_fake_photo(file_id='photo-1'),
+            caption='·Title',
+            caption_entities=[_linked_dot_entity(f'https://{identity}.com')],
+        ),
+        chat_id=42,
+    )
+    buffer.append(
+        _fake_message(
+            chat_id=42,
+            message_id=2,
+            audio=_fake_audio(file_id='audio-1', file_name='one.mp3'),
+        ),
+        chat_id=42,
+    )
+    track_store = SimpleNamespace(
+        list_tracks=AsyncMock(return_value=_tracks_by_sub_season_with_id(track_id)),
+        update=AsyncMock(side_effect=update_error),
+    )
+    services = _services(clip_store=SimpleNamespace(), track_store=track_store, buffer=buffer)
+    message = _fake_message(text='Select action:', chat_id=42, message_id=15)
+    state = _FakeState()
+    bot = SimpleNamespace(
+        get_file=AsyncMock(return_value=SimpleNamespace(file_path='audio-path-1')),
+        download_file=AsyncMock(return_value=BytesIO(b'audio-1')),
+    )
+    monkeypatch.setattr(track_store_execution_module, 'to_opus', AsyncMock(return_value=b'opus-1'))
+
+    await on_track_intake_action(
+        _fake_callback(message, bot=bot),
+        TrackIntakeActionCallbackData(action=TrackIntakeAction.TRACK, buffer_version=buffer.version(42)),
+        state,
+        services,
+        _settings(),
+    )
+
+    message.edit_text.assert_awaited_with('Invalid input', reply_markup=None)
+    assert services.chat_message_buffer.peek_raw(42) == []
+
+
+@pytest.mark.asyncio
+async def test_track_replace_action_missing_target_invalidates_before_selected_state() -> None:
+    group = track_store_module.TrackGroup(
+        universe=track_store_module.TrackUniverse.WEST,
+        year=2026,
+        season=track_store_module.Season.S1,
+    )
+    track_id = _CLIP_ID_1
+    identity = track_store_module.TrackStore.track_identity_to_string(group, track_id)
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(
+            chat_id=42,
+            message_id=1,
+            photo=_fake_photo(file_id='photo-1'),
+            caption='·Title',
+            caption_entities=[_linked_dot_entity(f'https://{identity}.com')],
+        ),
+        chat_id=42,
+    )
+    buffer.append(
+        _fake_message(
+            chat_id=42,
+            message_id=2,
+            audio=_fake_audio(file_id='audio-1', file_name='one.mp3'),
+        ),
+        chat_id=42,
+    )
+    track_store = SimpleNamespace(
+        list_tracks=AsyncMock(return_value=_tracks_by_sub_season_with_id(_CLIP_ID_2)),
+        update=AsyncMock(),
+    )
+    services = _services(clip_store=SimpleNamespace(), track_store=track_store, buffer=buffer)
+    message = _fake_message(text='Select action:', chat_id=42, message_id=15)
+    state = _FakeState()
+
+    await on_track_intake_action(
+        _fake_callback(message, bot=SimpleNamespace()),
+        TrackIntakeActionCallbackData(action=TrackIntakeAction.TRACK, buffer_version=buffer.version(42)),
+        state,
+        services,
+        _settings(),
+    )
+
+    track_store.update.assert_not_awaited()
+    message.edit_text.assert_awaited_once_with('Invalid input', reply_markup=None)
+    assert services.chat_message_buffer.peek_raw(42) == []
+
+
+@pytest.mark.asyncio
+async def test_track_replace_action_missing_group_invalidates_before_selected_state() -> None:
+    group = track_store_module.TrackGroup(
+        universe=track_store_module.TrackUniverse.WEST,
+        year=2026,
+        season=track_store_module.Season.S1,
+    )
+    track_id = _CLIP_ID_1
+    identity = track_store_module.TrackStore.track_identity_to_string(group, track_id)
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(
+            chat_id=42,
+            message_id=1,
+            photo=_fake_photo(file_id='photo-1'),
+            caption='·Title',
+            caption_entities=[_linked_dot_entity(f'https://{identity}.com')],
+        ),
+        chat_id=42,
+    )
+    buffer.append(
+        _fake_message(
+            chat_id=42,
+            message_id=2,
+            audio=_fake_audio(file_id='audio-1', file_name='one.mp3'),
+        ),
+        chat_id=42,
+    )
+    track_store = SimpleNamespace(
+        list_tracks=AsyncMock(
+            side_effect=track_store_module.TrackGroupNotFoundError(
+                universe=track_store_module.TrackUniverse.WEST,
+                year=2026,
+                season=track_store_module.Season.S1,
+                sub_season=None,
+            )
+        ),
+        update=AsyncMock(),
+    )
+    services = _services(clip_store=SimpleNamespace(), track_store=track_store, buffer=buffer)
+    message = _fake_message(text='Select action:', chat_id=42, message_id=15)
+    state = _FakeState()
+
+    await on_track_intake_action(
+        _fake_callback(message, bot=SimpleNamespace()),
+        TrackIntakeActionCallbackData(action=TrackIntakeAction.TRACK, buffer_version=buffer.version(42)),
+        state,
+        services,
+        _settings(),
+    )
+
+    track_store.update.assert_not_awaited()
+    message.edit_text.assert_awaited_once_with('Invalid input', reply_markup=None)
+    assert services.chat_message_buffer.peek_raw(42) == []
+
+
+@pytest.mark.asyncio
+async def test_track_replace_action_flushes_early_and_preserves_new_messages(monkeypatch: pytest.MonkeyPatch) -> None:
+    group = track_store_module.TrackGroup(
+        universe=track_store_module.TrackUniverse.WEST,
+        year=2026,
+        season=track_store_module.Season.S1,
+    )
+    track_id = _CLIP_ID_1
+    identity = track_store_module.TrackStore.track_identity_to_string(group, track_id)
+    buffer = ChatMessageBuffer()
+    original_messages = [
+        _fake_message(
+            chat_id=42,
+            message_id=1,
+            photo=_fake_photo(file_id='photo-1'),
+            caption='·Title',
+            caption_entities=[_linked_dot_entity(f'https://{identity}.com')],
+        ),
+        _fake_message(
+            chat_id=42,
+            message_id=2,
+            audio=_fake_audio(file_id='audio-1', file_name='one.mp3'),
+        ),
+    ]
+    for buffered_message in original_messages:
+        buffer.append(buffered_message, chat_id=42)
+
+    async def _update_and_append(*args, **kwargs) -> None:
+        buffer.append(_fake_message(chat_id=42, message_id=99, text='new'), chat_id=42)
+
+    track_store = SimpleNamespace(
+        list_tracks=AsyncMock(return_value=_tracks_by_sub_season_with_id(track_id)),
+        update=AsyncMock(side_effect=_update_and_append),
+    )
+    services = _services(clip_store=SimpleNamespace(), track_store=track_store, buffer=buffer)
+    message = _fake_message(text='Select action:', chat_id=42, message_id=15)
+    state = _FakeState()
+    bot = SimpleNamespace(
+        get_file=AsyncMock(return_value=SimpleNamespace(file_path='audio-path-1')),
+        download_file=AsyncMock(return_value=BytesIO(b'audio-1')),
+    )
+    monkeypatch.setattr(track_store_execution_module, 'to_opus', AsyncMock(return_value=b'opus-1'))
+
+    await on_track_intake_action(
+        _fake_callback(message, bot=bot),
+        TrackIntakeActionCallbackData(action=TrackIntakeAction.TRACK, buffer_version=buffer.version(42)),
+        state,
+        services,
+        _settings(),
+    )
+
+    remaining_ids = [buffered_message.message_id for buffered_message in services.chat_message_buffer.peek_raw(42)]
+    assert remaining_ids == [99]
+
+
+@pytest.mark.asyncio
+async def test_track_replace_action_operational_failure_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    group = track_store_module.TrackGroup(
+        universe=track_store_module.TrackUniverse.WEST,
+        year=2026,
+        season=track_store_module.Season.S1,
+    )
+    track_id = _CLIP_ID_1
+    identity = track_store_module.TrackStore.track_identity_to_string(group, track_id)
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(
+            chat_id=42,
+            message_id=1,
+            photo=_fake_photo(file_id='photo-1'),
+            caption='·Title',
+            caption_entities=[_linked_dot_entity(f'https://{identity}.com')],
+        ),
+        chat_id=42,
+    )
+    buffer.append(
+        _fake_message(
+            chat_id=42,
+            message_id=2,
+            audio=_fake_audio(file_id='audio-1', file_name='one.mp3'),
+        ),
+        chat_id=42,
+    )
+    sync_error = track_store_module.TrackUpdateManifestSyncError(
+        stage='manifest_write',
+        track_id=track_id,
+        touched_keys=['tracks/a'],
+        manifest_key='tracks/manifest.json',
+    )
+    track_store = SimpleNamespace(
+        list_tracks=AsyncMock(return_value=_tracks_by_sub_season_with_id(track_id)),
+        update=AsyncMock(side_effect=sync_error),
+    )
+    services = _services(clip_store=SimpleNamespace(), track_store=track_store, buffer=buffer)
+    message = _fake_message(text='Select action:', chat_id=42, message_id=15)
+    state = _FakeState()
+    bot = SimpleNamespace(
+        get_file=AsyncMock(return_value=SimpleNamespace(file_path='audio-path-1')),
+        download_file=AsyncMock(return_value=BytesIO(b'audio-1')),
+    )
+    monkeypatch.setattr(track_store_execution_module, 'to_opus', AsyncMock(return_value=b'opus-1'))
+
+    with pytest.raises(track_store_module.TrackUpdateManifestSyncError):
+        await on_track_intake_action(
+            _fake_callback(message, bot=bot),
+            TrackIntakeActionCallbackData(action=TrackIntakeAction.TRACK, buffer_version=buffer.version(42)),
+            state,
+            services,
+            _settings(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_track_replace_action_opus_fast_path_skips_to_opus(monkeypatch: pytest.MonkeyPatch) -> None:
+    group = track_store_module.TrackGroup(
+        universe=track_store_module.TrackUniverse.WEST,
+        year=2026,
+        season=track_store_module.Season.S1,
+    )
+    track_id = _CLIP_ID_1
+    identity = track_store_module.TrackStore.track_identity_to_string(group, track_id)
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(
+            chat_id=42,
+            message_id=1,
+            photo=_fake_photo(file_id='photo-1'),
+            caption='·Title',
+            caption_entities=[_linked_dot_entity(f'https://{identity}.com')],
+        ),
+        chat_id=42,
+    )
+    buffer.append(
+        _fake_message(
+            chat_id=42,
+            message_id=2,
+            audio=_fake_audio(file_id='audio-1', file_name='one.opus'),
+        ),
+        chat_id=42,
+    )
+    track_store = SimpleNamespace(
+        list_tracks=AsyncMock(return_value=_tracks_by_sub_season_with_id(track_id)),
+        update=AsyncMock(),
+    )
+    services = _services(clip_store=SimpleNamespace(), track_store=track_store, buffer=buffer)
+    message = _fake_message(text='Select action:', chat_id=42, message_id=15)
+    state = _FakeState()
+    bot = SimpleNamespace(
+        get_file=AsyncMock(return_value=SimpleNamespace(file_path='audio-path-1')),
+        download_file=AsyncMock(return_value=BytesIO(b'opus-input')),
+    )
+    to_opus = AsyncMock(return_value=b'opus-converted')
+    monkeypatch.setattr(track_store_execution_module, 'to_opus', to_opus)
+
+    await on_track_intake_action(
+        _fake_callback(message, bot=bot),
+        TrackIntakeActionCallbackData(action=TrackIntakeAction.TRACK, buffer_version=buffer.version(42)),
+        state,
+        services,
+        _settings(),
+    )
+
+    to_opus.assert_not_awaited()
+    assert track_store.update.await_args.kwargs['track'] == FileBytes(data=b'opus-input', extension=Extension.OPUS)
+
+
+@pytest.mark.asyncio
+async def test_track_replace_action_non_opus_calls_to_opus(monkeypatch: pytest.MonkeyPatch) -> None:
+    group = track_store_module.TrackGroup(
+        universe=track_store_module.TrackUniverse.WEST,
+        year=2026,
+        season=track_store_module.Season.S1,
+    )
+    track_id = _CLIP_ID_1
+    identity = track_store_module.TrackStore.track_identity_to_string(group, track_id)
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(
+            chat_id=42,
+            message_id=1,
+            photo=_fake_photo(file_id='photo-1'),
+            caption='·Title',
+            caption_entities=[_linked_dot_entity(f'https://{identity}.com')],
+        ),
+        chat_id=42,
+    )
+    buffer.append(
+        _fake_message(
+            chat_id=42,
+            message_id=2,
+            audio=_fake_audio(file_id='audio-1', file_name='one.mp3'),
+        ),
+        chat_id=42,
+    )
+    track_store = SimpleNamespace(
+        list_tracks=AsyncMock(return_value=_tracks_by_sub_season_with_id(track_id)),
+        update=AsyncMock(),
+    )
+    services = _services(clip_store=SimpleNamespace(), track_store=track_store, buffer=buffer)
+    message = _fake_message(text='Select action:', chat_id=42, message_id=15)
+    state = _FakeState()
+    bot = SimpleNamespace(
+        get_file=AsyncMock(return_value=SimpleNamespace(file_path='audio-path-1')),
+        download_file=AsyncMock(return_value=BytesIO(b'mp3-input')),
+    )
+    to_opus = AsyncMock(return_value=b'opus-converted')
+    monkeypatch.setattr(track_store_execution_module, 'to_opus', to_opus)
+
+    await on_track_intake_action(
+        _fake_callback(message, bot=bot),
+        TrackIntakeActionCallbackData(action=TrackIntakeAction.TRACK, buffer_version=buffer.version(42)),
+        state,
+        services,
+        _settings(),
+    )
+
+    to_opus.assert_awaited_once_with(b'mp3-input')
+    assert track_store.update.await_args.kwargs['track'] == FileBytes(data=b'opus-converted', extension=Extension.OPUS)
 
 
 @pytest.mark.asyncio

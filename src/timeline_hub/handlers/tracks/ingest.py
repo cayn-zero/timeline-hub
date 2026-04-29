@@ -15,21 +15,35 @@ from timeline_hub.handlers.menu import (
     back_button,
     callback_message,
     create_padding_line,
-    dummy_button,
     fixed_option_keyboard,
     handle_stale_selection,
     selected_text,
+    selection_keyboard,
     selection_text,
-    stacked_keyboard,
     validate_flow_state,
 )
 from timeline_hub.handlers.tracks.store_execution import (
     TrackInputError,
+    extract_single_photo_audio_messages,
+    extract_track_identity_from_photo_message,
+    prepare_audio_from_message,
     prepare_tracks_from_buffer,
 )
 from timeline_hub.services.container import Services
-from timeline_hub.services.track_store import Season, SubSeason, TrackGroup, TrackUniverse
+from timeline_hub.services.track_store import (
+    InvalidTrackIdentityError,
+    Season,
+    SubSeason,
+    TrackGroup,
+    TrackGroupNotFoundError,
+    TrackInvalidAudioFormatError,
+    TrackManifestCorruptedError,
+    TrackPresetsCorruptedError,
+    TrackUniverse,
+    TrackUpdateManifestSyncError,
+)
 from timeline_hub.settings import Settings
+from timeline_hub.types import InvalidExtensionError
 
 router = Router()
 _TRACK_STORE_MODE = 'track_store'
@@ -38,6 +52,8 @@ _TRACK_BACK_VALUE = 'back'
 
 class TrackIntakeAction(StrEnum):
     STORE = auto()
+    TRACK = auto()
+    INSTRUMENTAL = auto()
     CANCEL = auto()
 
 
@@ -96,6 +112,21 @@ async def on_track_intake_action(
         await state.clear()
         await message.edit_text('Canceled', reply_markup=None)
         services.chat_message_buffer.flush(message.chat.id)
+        return
+
+    if callback_data.action in (TrackIntakeAction.TRACK, TrackIntakeAction.INSTRUMENTAL):
+        bot = getattr(callback, 'bot', None)
+        if bot is None:
+            await _invalidate_track_intake_buffer(message=message, state=state, services=services, text='Invalid input')
+            return
+        await _execute_track_update(
+            message=message,
+            state=state,
+            services=services,
+            action=callback_data.action,
+            bot=bot,
+            expected_buffer_version=callback_data.buffer_version,
+        )
         return
 
     await _show_store_universe_menu(
@@ -247,7 +278,7 @@ def _track_intake_menu_kwargs(
             '\n',
             Text('Messages: ', Bold(str(message_count))),
         ).as_kwargs(),
-        'reply_markup': stacked_keyboard(
+        'reply_markup': selection_keyboard(
             buttons=[
                 InlineKeyboardButton(
                     text='Store',
@@ -256,15 +287,28 @@ def _track_intake_menu_kwargs(
                         buffer_version=buffer_version,
                     ).pack(),
                 ),
-                dummy_button(),
                 InlineKeyboardButton(
-                    text='Cancel',
+                    text='Track',
                     callback_data=TrackIntakeActionCallbackData(
-                        action=TrackIntakeAction.CANCEL,
+                        action=TrackIntakeAction.TRACK,
                         buffer_version=buffer_version,
                     ).pack(),
                 ),
-            ]
+                InlineKeyboardButton(
+                    text='Instrumental',
+                    callback_data=TrackIntakeActionCallbackData(
+                        action=TrackIntakeAction.INSTRUMENTAL,
+                        buffer_version=buffer_version,
+                    ).pack(),
+                ),
+            ],
+            back_button=InlineKeyboardButton(
+                text='Cancel',
+                callback_data=TrackIntakeActionCallbackData(
+                    action=TrackIntakeAction.CANCEL,
+                    buffer_version=buffer_version,
+                ).pack(),
+            ),
         ),
     }
 
@@ -584,6 +628,97 @@ async def _execute_track_store(
     await message.answer(**Text('Stored: ', Bold(str(len(prepared_tracks)))).as_kwargs())
 
 
+async def _execute_track_update(
+    *,
+    message: Message,
+    state: FSMContext,
+    services: Services,
+    action: TrackIntakeAction,
+    bot: Bot,
+    expected_buffer_version: int,
+) -> None:
+    chat_id = message.chat.id
+    buffered_messages = services.chat_message_buffer.peek_flat(chat_id)
+    owns_buffer = False
+    try:
+        photo_message, audio_message = extract_single_photo_audio_messages(buffered_messages)
+        group, track_id = extract_track_identity_from_photo_message(photo_message)
+        tracks_by_sub_season = await services.track_store.list_tracks(group)
+        if not any(track.id == track_id for tracks in tracks_by_sub_season.values() for track in tracks):
+            raise TrackInputError('Invalid input')
+        if services.chat_message_buffer.version(chat_id) != expected_buffer_version:
+            await handle_stale_selection(message=message, state=state)
+            return
+        services.chat_message_buffer.flush(chat_id)
+        await state.clear()
+        owns_buffer = True
+        action_label = 'Track' if action is TrackIntakeAction.TRACK else 'Instrumental'
+        await message.edit_text(
+            **selected_text(
+                selected=[
+                    action_label,
+                    _format_universe(group.universe),
+                    str(group.year),
+                    str(int(group.season)),
+                ],
+            ),
+            reply_markup=None,
+        )
+        prepared_audio = await prepare_audio_from_message(bot=bot, audio_message=audio_message)
+        if action is TrackIntakeAction.TRACK:
+            await services.track_store.update(group, track_id, track=prepared_audio)
+        else:
+            await services.track_store.update(group, track_id, instrumental=prepared_audio)
+    except (
+        TrackInputError,
+        InvalidTrackIdentityError,
+        TrackGroupNotFoundError,
+        TrackInvalidAudioFormatError,
+        InvalidExtensionError,
+    ):
+        await _invalidate_track_intake_buffer(
+            message=message,
+            state=state,
+            services=services,
+            text='Invalid input',
+            flush_buffer=not owns_buffer,
+        )
+        return
+    except ValueError as error:
+        if _is_missing_track_error(error):
+            await _invalidate_track_intake_buffer(
+                message=message,
+                state=state,
+                services=services,
+                text='Invalid input',
+                flush_buffer=not owns_buffer,
+            )
+            return
+        raise
+    except (
+        TrackUpdateManifestSyncError,
+        TrackManifestCorruptedError,
+        TrackPresetsCorruptedError,
+    ):
+        raise
+
+    await message.answer('Done')
+
+
+async def _invalidate_track_intake_buffer(
+    *,
+    message: Message,
+    state: FSMContext,
+    services: Services,
+    text: str,
+    flush_buffer: bool = True,
+) -> None:
+    await state.clear()
+    if flush_buffer:
+        services.chat_message_buffer.flush(message.chat.id)
+    await message.edit_text(text, reply_markup=None)
+
+
 async def _set_track_store_context(
     *,
     state: FSMContext,
@@ -688,6 +823,10 @@ def _selected_store_path(
     if sub_season is not SubSeason.NONE:
         selected.append(_format_sub_season(sub_season))
     return selected
+
+
+def _is_missing_track_error(error: ValueError) -> bool:
+    return str(error).startswith('Track id ') and ' does not exist in group ' in str(error)
 
 
 def _format_universe(universe: TrackUniverse) -> str:
