@@ -92,6 +92,10 @@ class SubSeason(StrEnum):
     C = 'C'
     D = 'D'
 
+    @property
+    def exists(self) -> bool:
+        return self is not SubSeason.NONE
+
     def order(self) -> int:
         return tuple(type(self)).index(self)
 

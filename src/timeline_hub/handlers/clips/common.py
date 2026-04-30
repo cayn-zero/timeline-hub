@@ -101,7 +101,7 @@ def selection_labels(
         labels.append(format_selection_value(year))
     if season is not UNSET:
         labels.append(format_selection_value(season))
-    if sub_season is not UNSET and sub_season != SubSeason.NONE:
+    if isinstance(sub_season, SubSeason) and sub_season.exists:
         labels.append(format_selection_value(sub_season))
     if scope is not UNSET:
         labels.append(format_selection_value(scope))
@@ -169,9 +169,7 @@ def single_button_keyboard(*, button: InlineKeyboardButton) -> InlineKeyboardMar
 def split_sub_season_buttons(sub_seasons: Sequence[SubSeason]) -> tuple[list[SubSeason], SubSeason | None]:
     special_top = SubSeason.NONE if SubSeason.NONE in sub_seasons else None
     regular_buttons = [
-        sub_season
-        for sub_season in reversed(tuple(SubSeason))
-        if sub_season in sub_seasons and sub_season != SubSeason.NONE
+        sub_season for sub_season in reversed(tuple(SubSeason)) if sub_season in sub_seasons and sub_season.exists
     ]
     return regular_buttons, special_top
 

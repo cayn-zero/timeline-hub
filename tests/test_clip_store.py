@@ -87,6 +87,12 @@ def test_season_from_month_uses_exact_mapping() -> None:
     assert Season.from_month(12) is Season.S5
 
 
+def test_sub_season_exists_property() -> None:
+    assert SubSeason.NONE.exists is False
+    assert SubSeason.A.exists is True
+    assert SubSeason.B.exists is True
+
+
 def test_clip_identity_to_string_returns_expected_identity_string() -> None:
     group = ClipGroup(universe=Universe.WEST, year=2026, season=Season.S1)
     assert ClipStore.clip_identity_to_string(group, _UUID_1) == f'west-2026-1--{_UUID_1}'
