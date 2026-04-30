@@ -136,6 +136,12 @@ def _instrumental_key(*, universe: TrackUniverse, year: int, season: Season, tra
     )
 
 
+def test_sub_season_exists_property_reflects_none_semantics() -> None:
+    assert SubSeason.NONE.exists is False
+    assert SubSeason.A.exists is True
+    assert SubSeason.B.exists is True
+
+
 def _preset(
     *,
     name: str,

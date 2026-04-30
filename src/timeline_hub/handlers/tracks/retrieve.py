@@ -1018,7 +1018,7 @@ def _selected_retrieve_path(
     sub_season: SubSeason,
 ) -> list[str]:
     selected = ['Get', _format_universe(universe), str(year), str(int(season))]
-    if sub_season is not SubSeason.NONE:
+    if sub_season.exists:
         selected.append(_format_sub_season(sub_season))
     return selected
 

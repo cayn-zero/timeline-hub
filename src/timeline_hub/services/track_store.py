@@ -181,6 +181,10 @@ class SubSeason(StrEnum):
     C = 'C'
     D = 'D'
 
+    @property
+    def exists(self) -> bool:
+        return self is not SubSeason.NONE
+
     def order(self) -> int:
         """Return the canonical display and listing order for sub-seasons."""
         return tuple(type(self)).index(self)

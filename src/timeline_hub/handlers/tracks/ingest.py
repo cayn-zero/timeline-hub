@@ -36,6 +36,7 @@ from timeline_hub.services.track_store import (
     SubSeason,
     TrackGroup,
     TrackGroupNotFoundError,
+    TrackInfo,
     TrackInvalidAudioFormatError,
     TrackManifestCorruptedError,
     TrackPresetsCorruptedError,
@@ -644,7 +645,13 @@ async def _execute_track_update(
         photo_message, audio_message = extract_single_photo_audio_messages(buffered_messages)
         group, track_id = extract_track_identity_from_photo_message(photo_message)
         tracks_by_sub_season = await services.track_store.list_tracks(group)
-        if not any(track.id == track_id for tracks in tracks_by_sub_season.values() for track in tracks):
+        matched_sub_season = _resolve_track_sub_season(
+            tracks_by_sub_season,
+            track_id,
+        )
+        # Track id may not exist in current manifest (e.g. stale cover identity)
+        # -> treat as user-level invalid input
+        if matched_sub_season is None:
             raise TrackInputError('Invalid input')
         if services.chat_message_buffer.version(chat_id) != expected_buffer_version:
             await handle_stale_selection(message=message, state=state)
@@ -653,15 +660,16 @@ async def _execute_track_update(
         await state.clear()
         owns_buffer = True
         action_label = 'Track' if action is TrackIntakeAction.TRACK else 'Instrumental'
+        selected = [
+            action_label,
+            _format_universe(group.universe),
+            str(group.year),
+            str(int(group.season)),
+        ]
+        if matched_sub_season.exists:
+            selected.append(matched_sub_season.value)
         await message.edit_text(
-            **selected_text(
-                selected=[
-                    action_label,
-                    _format_universe(group.universe),
-                    str(group.year),
-                    str(int(group.season)),
-                ],
-            ),
+            **selected_text(selected=selected),
             reply_markup=None,
         )
         prepared_audio = await prepare_audio_from_message(bot=bot, audio_message=audio_message)
@@ -820,13 +828,23 @@ def _selected_store_path(
     sub_season: SubSeason,
 ) -> list[str]:
     selected = ['Store', _format_universe(universe), str(year), str(int(season))]
-    if sub_season is not SubSeason.NONE:
+    if sub_season.exists:
         selected.append(_format_sub_season(sub_season))
     return selected
 
 
 def _is_missing_track_error(error: ValueError) -> bool:
     return str(error).startswith('Track id ') and ' does not exist in group ' in str(error)
+
+
+def _resolve_track_sub_season(
+    tracks_by_sub_season: dict[SubSeason, list[TrackInfo]],
+    track_id: str,
+) -> SubSeason | None:
+    for sub_season, tracks in tracks_by_sub_season.items():
+        if any(track.id == track_id for track in tracks):
+            return sub_season
+    return None
 
 
 def _format_universe(universe: TrackUniverse) -> str:

@@ -501,6 +501,22 @@ def _tracks_by_sub_season_with_id(
     }
 
 
+def _tracks_by_sub_season_with_id_and_sub_season(
+    track_id: str,
+    sub_season: track_store_module.SubSeason,
+) -> dict[track_store_module.SubSeason, list[track_store_module.TrackInfo]]:
+    return {
+        sub_season: [
+            track_store_module.TrackInfo(
+                id=track_id,
+                artists=('Artist',),
+                title='Title',
+                has_instrumental=False,
+            )
+        ]
+    }
+
+
 def _keyboard_rows(reply_markup) -> list[list[str]]:
     return [[button.text for button in row] for row in reply_markup.inline_keyboard]
 
@@ -2270,7 +2286,7 @@ async def test_track_replace_action_updates_track_audio_and_flushes_buffer(monke
     assert 'instrumental' not in track_store.update.await_args.kwargs
     _assert_format_kwargs(
         message.edit_text.await_args_list[0].kwargs,
-        _selected_kwargs('Track', 'West', '2026', '1'),
+        _selected_kwargs('Track', 'West', '2026', '1', 'A'),
     )
     assert message.edit_text.await_args_list[0].kwargs['reply_markup'] is None
     message.answer.assert_awaited_once_with('Done')
@@ -2334,7 +2350,7 @@ async def test_track_replace_action_updates_instrumental_and_flushes_buffer(monk
     assert 'track' not in track_store.update.await_args.kwargs
     _assert_format_kwargs(
         message.edit_text.await_args_list[0].kwargs,
-        _selected_kwargs('Instrumental', 'West', '2026', '1'),
+        _selected_kwargs('Instrumental', 'West', '2026', '1', 'A'),
     )
     assert message.edit_text.await_args_list[0].kwargs['reply_markup'] is None
     message.answer.assert_awaited_once_with('Done')
@@ -2392,6 +2408,67 @@ async def test_track_replace_action_accepts_photo_audio_in_any_order(
 
     track_store.update.assert_awaited_once()
     assert services.chat_message_buffer.peek_raw(42) == []
+
+
+@pytest.mark.asyncio
+async def test_track_replace_action_hides_none_sub_season_in_selected_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = track_store_module.TrackGroup(
+        universe=track_store_module.TrackUniverse.WEST,
+        year=2026,
+        season=track_store_module.Season.S1,
+    )
+    track_id = _CLIP_ID_1
+    identity = track_store_module.TrackStore.track_identity_to_string(group, track_id)
+    buffer = ChatMessageBuffer()
+    buffer.append(
+        _fake_message(
+            chat_id=42,
+            message_id=1,
+            photo=_fake_photo(file_id='photo-1'),
+            caption='·Title',
+            caption_entities=[_linked_dot_entity(f'https://{identity}.com')],
+        ),
+        chat_id=42,
+    )
+    buffer.append(
+        _fake_message(
+            chat_id=42,
+            message_id=2,
+            audio=_fake_audio(file_id='audio-1', file_name='one.mp3'),
+        ),
+        chat_id=42,
+    )
+    track_store = SimpleNamespace(
+        list_tracks=AsyncMock(
+            return_value=_tracks_by_sub_season_with_id_and_sub_season(track_id, track_store_module.SubSeason.NONE)
+        ),
+        update=AsyncMock(),
+    )
+    services = _services(clip_store=SimpleNamespace(), track_store=track_store, buffer=buffer)
+    message = _fake_message(text='Select action:', chat_id=42, message_id=15)
+    state = _FakeState()
+    bot = SimpleNamespace(
+        get_file=AsyncMock(return_value=SimpleNamespace(file_path='audio-path-1')),
+        download_file=AsyncMock(return_value=BytesIO(b'audio-1')),
+    )
+    monkeypatch.setattr(track_store_execution_module, 'to_opus', AsyncMock(return_value=b'opus-1'))
+
+    await on_track_intake_action(
+        _fake_callback(message, bot=bot),
+        TrackIntakeActionCallbackData(action=TrackIntakeAction.TRACK, buffer_version=buffer.version(42)),
+        state,
+        services,
+        _settings(),
+    )
+
+    _assert_format_kwargs(
+        message.edit_text.await_args_list[0].kwargs,
+        _selected_kwargs('Track', 'West', '2026', '1'),
+    )
+    assert ' / None' not in message.edit_text.await_args_list[0].kwargs['text']
+    assert ' / none' not in message.edit_text.await_args_list[0].kwargs['text']
 
 
 @pytest.mark.asyncio
