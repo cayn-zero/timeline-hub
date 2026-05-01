@@ -36,49 +36,42 @@ async def to_opus(
     if bitrate < 1:
         raise ValueError('bitrate must be >= 1')
 
-    input_fd, input_name = tempfile.mkstemp(suffix='.audio')
-    output_fd, output_name = tempfile.mkstemp(suffix='.opus')
-    os.close(input_fd)
-    os.close(output_fd)
-
-    input_path = Path(input_name)
-    output_path = Path(output_name)
-
-    try:
-        input_path.write_bytes(audio_bytes)
-
-        cmd = (
-            'ffmpeg',
-            '-hide_banner',
-            '-loglevel',
-            'error',
-            '-nostats',
-            '-nostdin',
-            '-y',
-            '-threads',
-            '1',
-            '-i',
-            str(input_path),
-            '-vn',
-            '-ar',
-            '48000',
-            '-c:a',
-            'libopus',
-            '-b:a',
-            f'{bitrate}k',
-            '-vbr',
-            'on',
-            '-compression_level',
-            '10',
-            str(output_path),
-        )
-        await _run_ffmpeg(cmd, timeout)
-
-        return output_path.read_bytes()
-
-    finally:
-        input_path.unlink(missing_ok=True)
-        output_path.unlink(missing_ok=True)
+    cmd = (
+        'ffmpeg',
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-nostats',
+        '-nostdin',
+        '-y',
+        '-threads',
+        '1',
+        '-i',
+        'pipe:0',
+        '-vn',
+        '-ar',
+        '48000',
+        '-c:a',
+        'libopus',
+        '-b:a',
+        f'{bitrate}k',
+        '-vbr',
+        'on',
+        '-compression_level',
+        '10',
+        '-f',
+        'opus',
+        'pipe:1',
+    )
+    output = await _run_ffmpeg(
+        cmd,
+        timeout,
+        stdin_bytes=audio_bytes,
+        capture='stdout',
+    )
+    if not output.startswith(b'OggS'):
+        raise RuntimeError('ffmpeg output is not a valid Ogg/Opus container')
+    return output
 
 
 async def create_audio_variant(

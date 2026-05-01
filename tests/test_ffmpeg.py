@@ -543,6 +543,89 @@ async def test_to_opus_outputs_48khz_audio() -> None:
     assert await ffmpeg_module.probe_audio_sample_rate(opus_bytes) == 48_000
 
 
+@pytest.mark.asyncio
+async def test_to_opus_uses_pipe_based_ffmpeg_and_returns_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    async def _fake_run_ffmpeg(
+        cmd: tuple[str, ...],
+        timeout: timedelta,
+        *,
+        stdin_bytes: bytes | None = None,
+        capture: str = 'none',
+    ) -> bytes:
+        observed['cmd'] = cmd
+        observed['timeout'] = timeout
+        observed['stdin_bytes'] = stdin_bytes
+        observed['capture'] = capture
+        return b'OggSfake-opus-data'
+
+    def _unexpected_mkstemp(*args: object, **kwargs: object) -> tuple[int, str]:
+        raise AssertionError('tempfile.mkstemp should not be used by to_opus')
+
+    monkeypatch.setattr(ffmpeg_module, '_run_ffmpeg', _fake_run_ffmpeg)
+    monkeypatch.setattr(ffmpeg_module.tempfile, 'mkstemp', _unexpected_mkstemp)
+
+    result = await ffmpeg_module.to_opus(
+        b'source-audio',
+        bitrate=96,
+        timeout=timedelta(seconds=9),
+    )
+
+    assert result == b'OggSfake-opus-data'
+    assert observed['timeout'] == timedelta(seconds=9)
+    assert observed['stdin_bytes'] == b'source-audio'
+    assert observed['capture'] == 'stdout'
+    assert observed['cmd'] == (
+        'ffmpeg',
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-nostats',
+        '-nostdin',
+        '-y',
+        '-threads',
+        '1',
+        '-i',
+        'pipe:0',
+        '-vn',
+        '-ar',
+        '48000',
+        '-c:a',
+        'libopus',
+        '-b:a',
+        '96k',
+        '-vbr',
+        'on',
+        '-compression_level',
+        '10',
+        '-f',
+        'opus',
+        'pipe:1',
+    )
+
+
+@pytest.mark.asyncio
+async def test_to_opus_rejects_non_ogg_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_run_ffmpeg(
+        cmd: tuple[str, ...],
+        timeout: timedelta,
+        *,
+        stdin_bytes: bytes | None = None,
+        capture: str = 'none',
+    ) -> bytes:
+        return b'not-ogg'
+
+    monkeypatch.setattr(ffmpeg_module, '_run_ffmpeg', _fake_run_ffmpeg)
+
+    with pytest.raises(RuntimeError, match='ffmpeg output is not a valid Ogg/Opus container'):
+        await ffmpeg_module.to_opus(b'source-audio')
+
+
 def _build_wav_bytes(*, sample_rate: int, duration_seconds: float = 0.1) -> bytes:
     frame_count = int(sample_rate * duration_seconds)
     amplitude = 12_000
