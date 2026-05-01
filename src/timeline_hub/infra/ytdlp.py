@@ -4,21 +4,12 @@ from datetime import timedelta
 from pathlib import Path
 
 
-async def download_audio_as_opus(
+async def _download_audio_as_opus_internal(
     url: str,
     *,
-    timeout: timedelta = timedelta(minutes=3),
-) -> bytes:
-    """Download one URL audio track as Opus bytes using `yt-dlp`.
-
-    Args:
-        url: Source URL to download.
-        timeout: Maximum time allowed for the `yt-dlp` subprocess run.
-
-    Raises:
-        ValueError: If `url` is invalid.
-        RuntimeError: If `yt-dlp` fails or output validation fails.
-    """
+    download_cover: bool,
+    timeout: timedelta,
+) -> tuple[bytes, bytes | None]:
     if not isinstance(url, str):
         raise ValueError('url must be a string')
 
@@ -28,7 +19,7 @@ async def download_audio_as_opus(
 
     with tempfile.TemporaryDirectory() as temp_dir:
         output_template = Path(temp_dir) / 'audio.%(ext)s'
-        proc = await asyncio.create_subprocess_exec(
+        args: list[str] = [
             'yt-dlp',
             '-f',
             'bestaudio[acodec=opus]/bestaudio',
@@ -37,9 +28,18 @@ async def download_audio_as_opus(
             'opus',
             '--quiet',
             '--no-playlist',
-            '-o',
-            str(output_template),
-            normalized_url,
+        ]
+        if download_cover:
+            args.extend(
+                [
+                    '--write-thumbnail',
+                    '--convert-thumbnails',
+                    'jpg',
+                ]
+            )
+        args.extend(['-o', str(output_template), normalized_url])
+        proc = await asyncio.create_subprocess_exec(
+            *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -64,7 +64,68 @@ async def download_audio_as_opus(
         if len(output_files) > 1:
             raise RuntimeError('yt-dlp produced multiple opus outputs')
 
-        data = output_files[0].read_bytes()
-        if not data.startswith(b'OggS'):
+        audio_bytes = output_files[0].read_bytes()
+        if not audio_bytes.startswith(b'OggS'):
             raise RuntimeError('yt-dlp output is not a valid Ogg/Opus container')
-        return data
+
+        if not download_cover:
+            return audio_bytes, None
+
+        cover_files = sorted(Path(temp_dir).glob('*.jpg'))
+        if not cover_files:
+            return audio_bytes, None
+        if len(cover_files) > 1:
+            raise RuntimeError('yt-dlp produced multiple cover outputs')
+
+        cover_bytes = cover_files[0].read_bytes()
+        if not cover_bytes:
+            raise RuntimeError('yt-dlp produced empty cover output')
+        return audio_bytes, cover_bytes
+
+
+async def download_audio_as_opus(
+    url: str,
+    *,
+    timeout: timedelta = timedelta(minutes=3),
+) -> bytes:
+    """Download one URL audio track as Opus bytes using `yt-dlp`.
+
+    Args:
+        url: Source URL to download.
+        timeout: Maximum time allowed for the `yt-dlp` subprocess run.
+
+    Raises:
+        ValueError: If `url` is invalid.
+        RuntimeError: If `yt-dlp` fails or output validation fails.
+    """
+    audio, _ = await _download_audio_as_opus_internal(
+        url,
+        download_cover=False,
+        timeout=timeout,
+    )
+    return audio
+
+
+async def download_audio_as_opus_and_cover(
+    url: str,
+    *,
+    timeout: timedelta = timedelta(minutes=3),
+) -> tuple[bytes, bytes]:
+    """Download one URL audio track as Opus bytes and cover as JPG bytes using `yt-dlp`.
+
+    Args:
+        url: Source URL to download.
+        timeout: Maximum time allowed for the `yt-dlp` subprocess run.
+
+    Raises:
+        ValueError: If `url` is invalid.
+        RuntimeError: If `yt-dlp` fails or output validation fails.
+    """
+    audio, cover = await _download_audio_as_opus_internal(
+        url,
+        download_cover=True,
+        timeout=timeout,
+    )
+    if cover is None:
+        raise RuntimeError('yt-dlp did not produce cover output')
+    return audio, cover

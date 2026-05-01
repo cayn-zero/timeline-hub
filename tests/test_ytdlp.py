@@ -54,8 +54,86 @@ async def test_download_audio_as_opus_builds_expected_command_and_returns_bytes(
     assert 'opus' in args
     assert '--quiet' in args
     assert '--no-playlist' in args
+    assert '--write-thumbnail' not in args
+    assert '--convert-thumbnails' not in args
     assert '-o' in args
     assert args[-1] == 'https://example.com/watch?v=abc'
+
+
+@pytest.mark.asyncio
+async def test_download_audio_as_opus_and_cover_builds_expected_command_and_returns_tuple(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+    expected_audio = b'OggS-opus-bytes'
+    expected_cover = b'jpg-cover-bytes'
+
+    class _FakeProc:
+        def __init__(self) -> None:
+            self.returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            args = observed['args']
+            output_template = Path(str(args[args.index('-o') + 1]))
+            output_template.with_suffix('.opus').write_bytes(expected_audio)
+            output_template.with_suffix('.jpg').write_bytes(expected_cover)
+            return b'', b''
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def _fake_create_subprocess_exec(*args: str, **kwargs: object) -> _FakeProc:
+        observed['args'] = args
+        observed['kwargs'] = kwargs
+        return _FakeProc()
+
+    monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+
+    audio, cover = await ytdlp_module.download_audio_as_opus_and_cover(
+        'https://example.com/watch?v=abc',
+        timeout=timedelta(seconds=7),
+    )
+
+    assert audio == expected_audio
+    assert cover == expected_cover
+    args = observed['args']
+    assert '--write-thumbnail' in args
+    assert '--convert-thumbnails' in args
+    assert 'jpg' in args
+
+
+@pytest.mark.asyncio
+async def test_download_audio_as_opus_and_cover_raises_when_cover_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            args = observed['args']
+            output_template = Path(str(args[args.index('-o') + 1]))
+            output_template.with_suffix('.opus').write_bytes(b'OggS-opus-bytes')
+            return b'', b''
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def _fake_create_subprocess_exec(*args: str, **kwargs: object) -> _FakeProc:
+        observed['args'] = args
+        return _FakeProc()
+
+    monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+
+    with pytest.raises(RuntimeError, match='yt-dlp did not produce cover output'):
+        await ytdlp_module.download_audio_as_opus_and_cover('https://example.com/watch?v=abc')
 
 
 @pytest.mark.asyncio
