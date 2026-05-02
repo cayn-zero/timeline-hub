@@ -102,6 +102,7 @@ async def get_media_duration(
     normalized_url = _normalize_url(url)
     proc = await asyncio.create_subprocess_exec(
         'yt-dlp',
+        '--no-warnings',
         '--print',
         '%(duration)s',
         '--skip-download',
@@ -172,6 +173,7 @@ async def _download_audio_as_opus_internal(
             '--audio-format',
             'opus',
             '--quiet',
+            '--no-warnings',
             '--no-playlist',
         ]
         if download_cover:
@@ -243,6 +245,7 @@ async def _download_cover_as_jpg(
             '--convert-thumbnails',
             'jpg',
             '--quiet',
+            '--no-warnings',
             '--no-playlist',
             '-o',
             str(output_template),
@@ -292,6 +295,7 @@ async def _download_audio_as_opus_clipped(
         '-f',
         'bestaudio[acodec=opus]/bestaudio',
         '--quiet',
+        '--no-warnings',
         '--no-playlist',
         '-o',
         '-',
