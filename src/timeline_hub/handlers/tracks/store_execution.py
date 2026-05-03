@@ -6,7 +6,7 @@ from aiogram.types import Message
 
 from timeline_hub.infra.ffmpeg import to_opus
 from timeline_hub.infra.images import normalize_cover_to_jpg
-from timeline_hub.infra.ytdlp import download_audio_as_opus, download_audio_as_opus_and_cover
+from timeline_hub.infra.ytdlp import download_audio_as_opus
 from timeline_hub.services.track_store import Track, TrackGroup, TrackId, TrackStore
 from timeline_hub.types import Extension, FileBytes
 
@@ -200,20 +200,22 @@ def validate_link_only_store_input(messages: Sequence[Message]) -> tuple[str, tu
 
 async def download_link_audio(url: str) -> FileBytes:
     try:
-        opus_bytes = await download_audio_as_opus(url)
+        result = await download_audio_as_opus(url)
     except Exception as error:
         raise TrackLinkDownloadError("Can't process audio") from error
-    return FileBytes(data=opus_bytes, extension=Extension.OPUS)
+    return FileBytes(data=result.audio, extension=Extension.OPUS)
 
 
 async def download_link_audio_and_cover(url: str) -> tuple[FileBytes, FileBytes]:
     try:
-        opus_bytes, cover_bytes = await download_audio_as_opus_and_cover(url)
+        result = await download_audio_as_opus(url, with_cover=True)
     except Exception as error:
         raise TrackLinkDownloadError(str(error)) from error
+    if result.cover is None:
+        raise TrackLinkDownloadError('yt-dlp did not produce cover output')
     return (
-        FileBytes(data=opus_bytes, extension=Extension.OPUS),
-        FileBytes(data=cover_bytes, extension=Extension.JPG),
+        FileBytes(data=result.audio, extension=Extension.OPUS),
+        FileBytes(data=result.cover, extension=Extension.JPG),
     )
 
 

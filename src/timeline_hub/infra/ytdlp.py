@@ -1,15 +1,36 @@
 import asyncio
+import json
 import tempfile
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
+
+
+@dataclass(frozen=True, slots=True)
+class TrackMetadata:
+    artists: tuple[str, ...]
+    title: str
+
+
+class YtDlpMetadataError(RuntimeError):
+    """Raised when yt-dlp metadata extraction or parsing fails."""
+
+
+@dataclass(frozen=True, slots=True)
+class DownloadedAudio:
+    audio: bytes
+    cover: bytes | None = None
+    metadata: TrackMetadata | None = None
 
 
 async def download_audio_as_opus(
     url: str,
     *,
+    with_cover: bool = False,
+    with_metadata: bool = False,
     max_duration: timedelta | None = None,
     timeout: timedelta = timedelta(minutes=3),
-) -> bytes:
+) -> DownloadedAudio:
     """Download one URL audio track as Opus bytes using `yt-dlp`.
 
     Args:
@@ -17,81 +38,66 @@ async def download_audio_as_opus(
         max_duration: Optional maximum audio duration to return.
         timeout: Maximum time allowed for the `yt-dlp` subprocess run.
 
+    Returns:
+        DownloadedAudio with Opus audio, optional JPG cover, and optional parsed track metadata.
+
     Raises:
         ValueError: If `url` is invalid.
         RuntimeError: If `yt-dlp` fails or output validation fails.
+        YtDlpMetadataError: If metadata is requested but cannot be extracted or parsed.
     """
-    if max_duration is None:
-        audio, _ = await _download_audio_as_opus_internal(
-            url,
-            download_cover=False,
-            timeout=timeout,
-        )
-        return audio
-
-    _validate_max_duration(max_duration)
-    duration = await get_media_duration(url, timeout=timedelta(seconds=30))
-    if duration is not None and duration <= max_duration:
-        audio, _ = await _download_audio_as_opus_internal(
-            url,
-            download_cover=False,
-            timeout=timeout,
-        )
-        return audio
-
-    return await _download_audio_as_opus_clipped(
+    result = await _download_audio(
         url,
+        with_cover=with_cover,
+        with_metadata=with_metadata,
         max_duration=max_duration,
         timeout=timeout,
     )
+    if with_cover and result.cover is None:
+        raise RuntimeError('yt-dlp did not produce cover output')
+    return result
 
 
-async def download_audio_as_opus_and_cover(
+async def _download_audio(
     url: str,
     *,
-    max_duration: timedelta | None = None,
-    timeout: timedelta = timedelta(minutes=3),
-) -> tuple[bytes, bytes]:
-    """Download one URL audio track as Opus bytes and cover as JPG bytes using `yt-dlp`.
-
-    Args:
-        url: Source URL to download.
-        max_duration: Optional maximum audio duration to return.
-        timeout: Maximum time allowed for the `yt-dlp` subprocess run.
-
-    Raises:
-        ValueError: If `url` is invalid.
-        RuntimeError: If `yt-dlp` fails or output validation fails.
-    """
+    with_cover: bool,
+    with_metadata: bool,
+    max_duration: timedelta | None,
+    timeout: timedelta,
+) -> DownloadedAudio:
     if max_duration is None:
-        audio, cover = await _download_audio_as_opus_internal(
+        audio, cover, metadata = await _download_audio_as_opus_internal(
             url,
-            download_cover=True,
+            download_cover=with_cover,
+            with_metadata=with_metadata,
             timeout=timeout,
         )
-        if cover is None:
-            raise RuntimeError('yt-dlp did not produce cover output')
-        return audio, cover
+        return DownloadedAudio(audio=audio, cover=cover, metadata=metadata)
 
     _validate_max_duration(max_duration)
     duration = await get_media_duration(url, timeout=timedelta(seconds=30))
     if duration is not None and duration <= max_duration:
-        audio, cover = await _download_audio_as_opus_internal(
+        audio, cover, metadata = await _download_audio_as_opus_internal(
             url,
-            download_cover=True,
+            download_cover=with_cover,
+            with_metadata=with_metadata,
             timeout=timeout,
         )
-        if cover is None:
-            raise RuntimeError('yt-dlp did not produce cover output')
-        return audio, cover
+        return DownloadedAudio(audio=audio, cover=cover, metadata=metadata)
+
+    if with_metadata:
+        raise YtDlpMetadataError('yt-dlp metadata is not supported for clipped downloads')
 
     audio = await _download_audio_as_opus_clipped(
         url,
         max_duration=max_duration,
         timeout=timeout,
     )
-    cover = await _download_cover_as_jpg(url, timeout=timeout)
-    return audio, cover
+    if with_cover:
+        cover = await _download_cover_as_jpg(url, timeout=timeout)
+        return DownloadedAudio(audio=audio, cover=cover)
+    return DownloadedAudio(audio=audio)
 
 
 async def get_media_duration(
@@ -159,8 +165,9 @@ async def _download_audio_as_opus_internal(
     url: str,
     *,
     download_cover: bool,
+    with_metadata: bool,
     timeout: timedelta,
-) -> tuple[bytes, bytes | None]:
+) -> tuple[bytes, bytes | None, TrackMetadata | None]:
     normalized_url = _normalize_url(url)
 
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -184,6 +191,8 @@ async def _download_audio_as_opus_internal(
                     'jpg',
                 ]
             )
+        if with_metadata:
+            args.append('--write-info-json')
         args.extend(['-o', str(output_template), normalized_url])
         proc = await asyncio.create_subprocess_exec(
             *args,
@@ -215,19 +224,74 @@ async def _download_audio_as_opus_internal(
         if not audio_bytes.startswith(b'OggS'):
             raise RuntimeError('yt-dlp output is not a valid Ogg/Opus container')
 
+        metadata: TrackMetadata | None = None
+        if with_metadata:
+            metadata_files = sorted(Path(temp_dir).glob('*.info.json'))
+            if not metadata_files:
+                raise YtDlpMetadataError('yt-dlp did not produce metadata output')
+            if len(metadata_files) > 1:
+                raise YtDlpMetadataError('yt-dlp produced multiple metadata outputs')
+            try:
+                metadata_obj = json.loads(metadata_files[0].read_text())
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise YtDlpMetadataError('yt-dlp produced invalid metadata output') from error
+            if not isinstance(metadata_obj, dict):
+                raise YtDlpMetadataError('yt-dlp produced invalid metadata output')
+            metadata = _parse_track_metadata(metadata_obj)
+
         if not download_cover:
-            return audio_bytes, None
+            return audio_bytes, None, metadata
 
         cover_files = sorted(Path(temp_dir).glob('*.jpg'))
         if not cover_files:
-            return audio_bytes, None
+            return audio_bytes, None, metadata
         if len(cover_files) > 1:
             raise RuntimeError('yt-dlp produced multiple cover outputs')
 
         cover_bytes = cover_files[0].read_bytes()
         if not cover_bytes:
             raise RuntimeError('yt-dlp produced empty cover output')
-        return audio_bytes, cover_bytes
+        return audio_bytes, cover_bytes, metadata
+
+
+def _parse_track_metadata(raw_metadata: dict[str, object]) -> TrackMetadata:
+    title_candidates = (raw_metadata.get('track'), raw_metadata.get('title'))
+    title = ''
+    for candidate in title_candidates:
+        if isinstance(candidate, str):
+            stripped = candidate.strip()
+            if stripped:
+                title = stripped
+                break
+
+    artists: tuple[str, ...] = ()
+    artists_value = raw_metadata.get('artists')
+    if isinstance(artists_value, list):
+        parsed_artists: list[str] = []
+        for value in artists_value:
+            if isinstance(value, str):
+                stripped = value.strip()
+                if stripped:
+                    parsed_artists.append(stripped)
+        if parsed_artists:
+            artists = tuple(parsed_artists)
+
+    if not artists:
+        artists = _parse_comma_separated_artists(raw_metadata.get('artist'))
+    if not artists:
+        artists = _parse_comma_separated_artists(raw_metadata.get('creator'))
+
+    if not title or not artists:
+        raise YtDlpMetadataError('yt-dlp produced incomplete metadata output')
+
+    return TrackMetadata(artists=artists, title=title)
+
+
+def _parse_comma_separated_artists(value: object) -> tuple[str, ...]:
+    if not isinstance(value, str):
+        return ()
+    artists = tuple(part.strip() for part in value.split(',') if part.strip())
+    return artists
 
 
 async def _download_cover_as_jpg(

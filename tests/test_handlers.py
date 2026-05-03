@@ -100,6 +100,7 @@ from timeline_hub.handlers.tracks.retrieve import (
 from timeline_hub.handlers.tracks.retrieve import (
     on_retrieve_menu as on_tracks_retrieve_menu,
 )
+from timeline_hub.infra.ytdlp import DownloadedAudio
 from timeline_hub.services.clip_store import (
     AudioNormalization,
     ClipGroup,
@@ -5823,7 +5824,7 @@ async def test_track_store_link_only_reuses_selected_album_cover(
     menu_message = _fake_message(text='Select action:', chat_id=42, message_id=985)
     state = _FakeState()
     bot = SimpleNamespace(get_file=AsyncMock(), download_file=AsyncMock())
-    download_audio_as_opus = AsyncMock(return_value=b'opus-bytes')
+    download_audio_as_opus = AsyncMock(return_value=DownloadedAudio(audio=b'opus-bytes'))
     monkeypatch.setattr(track_store_execution_module, 'download_audio_as_opus', download_audio_as_opus)
 
     await on_track_intake_action(
@@ -5927,9 +5928,7 @@ async def test_track_store_link_download_failure_is_retry_safe(
     state = _FakeState()
     bot = SimpleNamespace(get_file=AsyncMock(), download_file=AsyncMock())
     monkeypatch.setattr(
-        track_store_execution_module,
-        'download_audio_as_opus_and_cover',
-        AsyncMock(side_effect=RuntimeError('yt failed')),
+        track_store_execution_module, 'download_audio_as_opus', AsyncMock(side_effect=RuntimeError('yt failed'))
     )
     log_warning = Mock()
     monkeypatch.setattr(track_ingest_module.logger, 'warning', log_warning)
@@ -6001,10 +6000,8 @@ async def test_track_store_link_only_cover_source_auto_stores_downloaded_cover(
     menu_message = _fake_message(text='Select action:', chat_id=42, message_id=987)
     state = _FakeState()
     bot = SimpleNamespace(get_file=AsyncMock(), download_file=AsyncMock())
-    download_audio_as_opus_and_cover = AsyncMock(return_value=(b'opus-bytes', b'jpg-bytes'))
-    monkeypatch.setattr(
-        track_store_execution_module, 'download_audio_as_opus_and_cover', download_audio_as_opus_and_cover
-    )
+    download_audio_as_opus = AsyncMock(return_value=DownloadedAudio(audio=b'opus-bytes', cover=b'jpg-bytes'))
+    monkeypatch.setattr(track_store_execution_module, 'download_audio_as_opus', download_audio_as_opus)
 
     await on_track_intake_action(
         _fake_callback(menu_message),
@@ -6034,7 +6031,7 @@ async def test_track_store_link_only_cover_source_auto_stores_downloaded_cover(
         menu_message.edit_text.await_args.kwargs,
         _selected_kwargs('Store', 'West', str(year), '1', 'A', 'Auto'),
     )
-    download_audio_as_opus_and_cover.assert_awaited_once_with('https://www.youtube.com/watch?v=abc123')
+    download_audio_as_opus.assert_awaited_once_with('https://www.youtube.com/watch?v=abc123', with_cover=True)
     stored_track = track_store.store.await_args.kwargs['track']
     assert stored_track.artists == ('Artist 1', 'Artist 2')
     assert stored_track.title == 'Title'
@@ -6134,10 +6131,8 @@ async def test_track_store_link_only_without_albums_executes_auto_immediately(
     menu_message = _fake_message(text='Select action:', chat_id=42, message_id=989)
     state = _FakeState()
     bot = SimpleNamespace(get_file=AsyncMock(), download_file=AsyncMock())
-    download_audio_as_opus_and_cover = AsyncMock(return_value=(b'opus-bytes', b'jpg-bytes'))
-    monkeypatch.setattr(
-        track_store_execution_module, 'download_audio_as_opus_and_cover', download_audio_as_opus_and_cover
-    )
+    download_audio_as_opus = AsyncMock(return_value=DownloadedAudio(audio=b'opus-bytes', cover=b'jpg-bytes'))
+    monkeypatch.setattr(track_store_execution_module, 'download_audio_as_opus', download_audio_as_opus)
 
     await on_track_intake_action(
         _fake_callback(menu_message),
@@ -6154,7 +6149,7 @@ async def test_track_store_link_only_without_albums_executes_auto_immediately(
     ]:
         await on_track_store_menu(_fake_callback(menu_message), callback_data, state, services, settings, bot)
 
-    download_audio_as_opus_and_cover.assert_awaited_once_with('https://www.youtube.com/watch?v=abc123')
+    download_audio_as_opus.assert_awaited_once_with('https://www.youtube.com/watch?v=abc123', with_cover=True)
     track_store.store.assert_awaited_once()
     menu_message.answer.assert_awaited_once_with(text='Done')
     assert state.current_state is None
@@ -6196,10 +6191,8 @@ async def test_track_store_link_only_missing_group_executes_auto_immediately(
     menu_message = _fake_message(text='Select action:', chat_id=42, message_id=990)
     state = _FakeState()
     bot = SimpleNamespace(get_file=AsyncMock(), download_file=AsyncMock())
-    download_audio_as_opus_and_cover = AsyncMock(return_value=(b'opus-bytes', b'jpg-bytes'))
-    monkeypatch.setattr(
-        track_store_execution_module, 'download_audio_as_opus_and_cover', download_audio_as_opus_and_cover
-    )
+    download_audio_as_opus = AsyncMock(return_value=DownloadedAudio(audio=b'opus-bytes', cover=b'jpg-bytes'))
+    monkeypatch.setattr(track_store_execution_module, 'download_audio_as_opus', download_audio_as_opus)
 
     await on_track_intake_action(
         _fake_callback(menu_message),
@@ -6216,8 +6209,9 @@ async def test_track_store_link_only_missing_group_executes_auto_immediately(
     ]:
         await on_track_store_menu(_fake_callback(menu_message), callback_data, state, services, settings, bot)
 
-    download_audio_as_opus_and_cover.assert_awaited_once_with(
-        'https://www.youtube.com/watch?v=tDoVzwp-f_g&pp=ygUQYnJpbCBOb3cgaXQgZ29lcw%3D%3D'
+    download_audio_as_opus.assert_awaited_once_with(
+        'https://www.youtube.com/watch?v=tDoVzwp-f_g&pp=ygUQYnJpbCBOb3cgaXQgZ29lcw%3D%3D',
+        with_cover=True,
     )
     track_store.store.assert_awaited_once()
     menu_message.answer.assert_awaited_once_with(text='Done')

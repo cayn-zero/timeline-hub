@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from timeline_hub.infra import ytdlp as ytdlp_module
+from timeline_hub.infra.ytdlp import YtDlpMetadataError
 
 
 @pytest.mark.asyncio
@@ -44,7 +45,8 @@ async def test_download_audio_as_opus_builds_expected_command_and_returns_bytes(
         timeout=timedelta(seconds=7),
     )
 
-    assert result == expected_bytes
+    assert result.audio == expected_bytes
+    assert result.cover is None
     args = observed['args']
     assert args[0] == 'yt-dlp'
     assert '-f' in args
@@ -56,12 +58,13 @@ async def test_download_audio_as_opus_builds_expected_command_and_returns_bytes(
     assert '--no-playlist' in args
     assert '--write-thumbnail' not in args
     assert '--convert-thumbnails' not in args
+    assert '--write-info-json' not in args
     assert '-o' in args
     assert args[-1] == 'https://example.com/watch?v=abc'
 
 
 @pytest.mark.asyncio
-async def test_download_audio_as_opus_and_cover_builds_expected_command_and_returns_tuple(
+async def test_download_audio_as_opus_with_cover_builds_expected_command_and_returns_dataclass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed: dict[str, object] = {}
@@ -92,21 +95,388 @@ async def test_download_audio_as_opus_and_cover_builds_expected_command_and_retu
 
     monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
 
-    audio, cover = await ytdlp_module.download_audio_as_opus_and_cover(
+    result = await ytdlp_module.download_audio_as_opus(
         'https://example.com/watch?v=abc',
+        with_cover=True,
         timeout=timedelta(seconds=7),
     )
 
-    assert audio == expected_audio
-    assert cover == expected_cover
+    assert result.audio == expected_audio
+    assert result.cover == expected_cover
     args = observed['args']
     assert '--write-thumbnail' in args
     assert '--convert-thumbnails' in args
+    assert '--write-info-json' not in args
     assert 'jpg' in args
 
 
 @pytest.mark.asyncio
-async def test_download_audio_as_opus_and_cover_raises_when_cover_missing(
+async def test_download_audio_as_opus_with_metadata_writes_info_json_and_returns_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+    expected_audio = b'OggS-opus-bytes'
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            args = observed['args']
+            output_template = Path(str(args[args.index('-o') + 1]))
+            output_template.with_suffix('.opus').write_bytes(expected_audio)
+            output_template.with_suffix('.info.json').write_text('{"artists": ["A1", "A2"], "track": "Song"}')
+            return b'', b''
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def _fake_create_subprocess_exec(*args: str, **kwargs: object) -> _FakeProc:
+        observed['args'] = args
+        return _FakeProc()
+
+    monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+
+    result = await ytdlp_module.download_audio_as_opus('https://example.com/watch?v=abc', with_metadata=True)
+
+    assert result.audio == expected_audio
+    assert result.cover is None
+    assert result.metadata == ytdlp_module.TrackMetadata(artists=('A1', 'A2'), title='Song')
+    args = observed['args']
+    assert '--write-info-json' in args
+
+
+@pytest.mark.asyncio
+async def test_download_audio_as_opus_with_cover_and_metadata_returns_all_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            args = observed['args']
+            output_template = Path(str(args[args.index('-o') + 1]))
+            output_template.with_suffix('.opus').write_bytes(b'OggS-opus-bytes')
+            output_template.with_suffix('.jpg').write_bytes(b'jpg-cover-bytes')
+            output_template.with_suffix('.info.json').write_text('{"artist": "A1, A2", "title": "Track"}')
+            return b'', b''
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def _fake_create_subprocess_exec(*args: str, **kwargs: object) -> _FakeProc:
+        observed['args'] = args
+        return _FakeProc()
+
+    monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+
+    result = await ytdlp_module.download_audio_as_opus(
+        'https://example.com/watch?v=abc',
+        with_cover=True,
+        with_metadata=True,
+    )
+
+    assert result.audio == b'OggS-opus-bytes'
+    assert result.cover == b'jpg-cover-bytes'
+    assert result.metadata == ytdlp_module.TrackMetadata(artists=('A1', 'A2'), title='Track')
+    args = observed['args']
+    assert '--write-thumbnail' in args
+    assert '--write-info-json' in args
+
+
+@pytest.mark.asyncio
+async def test_download_audio_as_opus_with_metadata_raises_when_metadata_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            args = observed['args']
+            output_template = Path(str(args[args.index('-o') + 1]))
+            output_template.with_suffix('.opus').write_bytes(b'OggS-opus-bytes')
+            return b'', b''
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def _fake_create_subprocess_exec(*args: str, **kwargs: object) -> _FakeProc:
+        observed['args'] = args
+        return _FakeProc()
+
+    monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+
+    with pytest.raises(YtDlpMetadataError, match='yt-dlp did not produce metadata output'):
+        await ytdlp_module.download_audio_as_opus('https://example.com/watch?v=abc', with_metadata=True)
+
+
+@pytest.mark.asyncio
+async def test_download_audio_as_opus_with_metadata_raises_when_multiple_metadata_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            args = observed['args']
+            output_template = Path(str(args[args.index('-o') + 1]))
+            output_template.with_suffix('.opus').write_bytes(b'OggS-opus-bytes')
+            output_template.with_name('a.info.json').write_text('{}')
+            output_template.with_name('b.info.json').write_text('{}')
+            return b'', b''
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def _fake_create_subprocess_exec(*args: str, **kwargs: object) -> _FakeProc:
+        observed['args'] = args
+        return _FakeProc()
+
+    monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+
+    with pytest.raises(YtDlpMetadataError, match='yt-dlp produced multiple metadata outputs'):
+        await ytdlp_module.download_audio_as_opus('https://example.com/watch?v=abc', with_metadata=True)
+
+
+@pytest.mark.asyncio
+async def test_download_audio_as_opus_with_metadata_raises_when_metadata_invalid_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            args = observed['args']
+            output_template = Path(str(args[args.index('-o') + 1]))
+            output_template.with_suffix('.opus').write_bytes(b'OggS-opus-bytes')
+            output_template.with_suffix('.info.json').write_text('{invalid json')
+            return b'', b''
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def _fake_create_subprocess_exec(*args: str, **kwargs: object) -> _FakeProc:
+        observed['args'] = args
+        return _FakeProc()
+
+    monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+
+    with pytest.raises(YtDlpMetadataError, match='yt-dlp produced invalid metadata output'):
+        await ytdlp_module.download_audio_as_opus('https://example.com/watch?v=abc', with_metadata=True)
+
+
+@pytest.mark.asyncio
+async def test_download_audio_as_opus_with_metadata_raises_when_metadata_is_not_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            args = observed['args']
+            output_template = Path(str(args[args.index('-o') + 1]))
+            output_template.with_suffix('.opus').write_bytes(b'OggS-opus-bytes')
+            output_template.with_suffix('.info.json').write_text('["not","an","object"]')
+            return b'', b''
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def _fake_create_subprocess_exec(*args: str, **kwargs: object) -> _FakeProc:
+        observed['args'] = args
+        return _FakeProc()
+
+    monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+    with pytest.raises(YtDlpMetadataError, match='yt-dlp produced invalid metadata output'):
+        await ytdlp_module.download_audio_as_opus('https://example.com/watch?v=abc', with_metadata=True)
+
+
+@pytest.mark.asyncio
+async def test_download_audio_as_opus_with_metadata_uses_creator_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            args = observed['args']
+            output_template = Path(str(args[args.index('-o') + 1]))
+            output_template.with_suffix('.opus').write_bytes(b'OggS-opus-bytes')
+            output_template.with_suffix('.info.json').write_text('{"creator":"C1, C2","title":"Track"}')
+            return b'', b''
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def _fake_create_subprocess_exec(*args: str, **kwargs: object) -> _FakeProc:
+        observed['args'] = args
+        return _FakeProc()
+
+    monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+    result = await ytdlp_module.download_audio_as_opus('https://example.com/watch?v=abc', with_metadata=True)
+    assert result.metadata == ytdlp_module.TrackMetadata(artists=('C1', 'C2'), title='Track')
+
+
+@pytest.mark.asyncio
+async def test_download_audio_as_opus_with_metadata_title_falls_back_to_title_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            args = observed['args']
+            output_template = Path(str(args[args.index('-o') + 1]))
+            output_template.with_suffix('.opus').write_bytes(b'OggS-opus-bytes')
+            output_template.with_suffix('.info.json').write_text('{"artists":["A1"],"title":"Fallback"}')
+            return b'', b''
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def _fake_create_subprocess_exec(*args: str, **kwargs: object) -> _FakeProc:
+        observed['args'] = args
+        return _FakeProc()
+
+    monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+    result = await ytdlp_module.download_audio_as_opus('https://example.com/watch?v=abc', with_metadata=True)
+    assert result.metadata == ytdlp_module.TrackMetadata(artists=('A1',), title='Fallback')
+
+
+@pytest.mark.asyncio
+async def test_download_audio_as_opus_with_metadata_invalid_artists_list_falls_back_to_artist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            args = observed['args']
+            output_template = Path(str(args[args.index('-o') + 1]))
+            output_template.with_suffix('.opus').write_bytes(b'OggS-opus-bytes')
+            output_template.with_suffix('.info.json').write_text(
+                '{"artists":[123," "],"artist":"A1, A2","track":"Song"}'
+            )
+            return b'', b''
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def _fake_create_subprocess_exec(*args: str, **kwargs: object) -> _FakeProc:
+        observed['args'] = args
+        return _FakeProc()
+
+    monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+    result = await ytdlp_module.download_audio_as_opus('https://example.com/watch?v=abc', with_metadata=True)
+    assert result.metadata == ytdlp_module.TrackMetadata(artists=('A1', 'A2'), title='Song')
+
+
+@pytest.mark.asyncio
+async def test_download_audio_as_opus_with_metadata_raises_when_title_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            args = observed['args']
+            output_template = Path(str(args[args.index('-o') + 1]))
+            output_template.with_suffix('.opus').write_bytes(b'OggS-opus-bytes')
+            output_template.with_suffix('.info.json').write_text('{"artists":["A1"]}')
+            return b'', b''
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def _fake_create_subprocess_exec(*args: str, **kwargs: object) -> _FakeProc:
+        observed['args'] = args
+        return _FakeProc()
+
+    monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+    with pytest.raises(YtDlpMetadataError, match='yt-dlp produced incomplete metadata output'):
+        await ytdlp_module.download_audio_as_opus('https://example.com/watch?v=abc', with_metadata=True)
+
+
+@pytest.mark.asyncio
+async def test_download_audio_as_opus_with_metadata_raises_when_artists_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            args = observed['args']
+            output_template = Path(str(args[args.index('-o') + 1]))
+            output_template.with_suffix('.opus').write_bytes(b'OggS-opus-bytes')
+            output_template.with_suffix('.info.json').write_text('{"track":"Song"}')
+            return b'', b''
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def _fake_create_subprocess_exec(*args: str, **kwargs: object) -> _FakeProc:
+        observed['args'] = args
+        return _FakeProc()
+
+    monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+    with pytest.raises(YtDlpMetadataError, match='yt-dlp produced incomplete metadata output'):
+        await ytdlp_module.download_audio_as_opus('https://example.com/watch?v=abc', with_metadata=True)
+
+
+@pytest.mark.asyncio
+async def test_download_audio_as_opus_with_cover_raises_when_cover_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed: dict[str, object] = {}
@@ -133,7 +503,7 @@ async def test_download_audio_as_opus_and_cover_raises_when_cover_missing(
     monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
 
     with pytest.raises(RuntimeError, match='yt-dlp did not produce cover output'):
-        await ytdlp_module.download_audio_as_opus_and_cover('https://example.com/watch?v=abc')
+        await ytdlp_module.download_audio_as_opus('https://example.com/watch?v=abc', with_cover=True)
 
 
 @pytest.mark.asyncio
@@ -399,9 +769,10 @@ async def test_download_audio_as_opus_with_max_duration_uses_full_path_for_short
         url: str,
         *,
         download_cover: bool,
+        with_metadata: bool,
         timeout: timedelta,
-    ) -> tuple[bytes, bytes | None]:
-        return b'full', None
+    ) -> tuple[bytes, bytes | None, ytdlp_module.TrackMetadata | None]:
+        return b'full', None, None
 
     async def _fake_clipped(
         url: str,
@@ -421,7 +792,8 @@ async def test_download_audio_as_opus_with_max_duration_uses_full_path_for_short
         max_duration=timedelta(seconds=30),
     )
 
-    assert result == b'full'
+    assert result.audio == b'full'
+    assert result.cover is None
     assert observed['clipped_called'] is False
 
 
@@ -438,10 +810,11 @@ async def test_download_audio_as_opus_with_max_duration_uses_clipped_path_for_lo
         url: str,
         *,
         download_cover: bool,
+        with_metadata: bool,
         timeout: timedelta,
-    ) -> tuple[bytes, bytes | None]:
+    ) -> tuple[bytes, bytes | None, ytdlp_module.TrackMetadata | None]:
         observed['full_called'] = True
-        return b'full', None
+        return b'full', None, None
 
     async def _fake_clipped(
         url: str,
@@ -460,7 +833,8 @@ async def test_download_audio_as_opus_with_max_duration_uses_clipped_path_for_lo
         max_duration=timedelta(seconds=30),
     )
 
-    assert result == b'clipped'
+    assert result.audio == b'clipped'
+    assert result.cover is None
     assert observed['full_called'] is False
 
 
@@ -477,10 +851,11 @@ async def test_download_audio_as_opus_with_max_duration_uses_clipped_path_for_un
         url: str,
         *,
         download_cover: bool,
+        with_metadata: bool,
         timeout: timedelta,
-    ) -> tuple[bytes, bytes | None]:
+    ) -> tuple[bytes, bytes | None, ytdlp_module.TrackMetadata | None]:
         observed['full_called'] = True
-        return b'full', None
+        return b'full', None, None
 
     async def _fake_clipped(
         url: str,
@@ -499,12 +874,30 @@ async def test_download_audio_as_opus_with_max_duration_uses_clipped_path_for_un
         max_duration=timedelta(seconds=30),
     )
 
-    assert result == b'clipped'
+    assert result.audio == b'clipped'
+    assert result.cover is None
     assert observed['full_called'] is False
 
 
 @pytest.mark.asyncio
-async def test_download_audio_as_opus_and_cover_with_max_duration_uses_full_path_for_short_media(
+async def test_download_audio_as_opus_with_metadata_rejects_clipped_downloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_get_media_duration(url: str, *, timeout: timedelta) -> timedelta | None:
+        return timedelta(seconds=31)
+
+    monkeypatch.setattr(ytdlp_module, 'get_media_duration', _fake_get_media_duration)
+
+    with pytest.raises(YtDlpMetadataError, match='yt-dlp metadata is not supported for clipped downloads'):
+        await ytdlp_module.download_audio_as_opus(
+            'https://example.com/watch?v=abc',
+            with_metadata=True,
+            max_duration=timedelta(seconds=30),
+        )
+
+
+@pytest.mark.asyncio
+async def test_download_audio_as_opus_with_cover_and_max_duration_uses_full_path_for_short_media(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed = {'clipped_called': False}
@@ -516,10 +909,11 @@ async def test_download_audio_as_opus_and_cover_with_max_duration_uses_full_path
         url: str,
         *,
         download_cover: bool,
+        with_metadata: bool,
         timeout: timedelta,
-    ) -> tuple[bytes, bytes | None]:
+    ) -> tuple[bytes, bytes | None, ytdlp_module.TrackMetadata | None]:
         assert download_cover is True
-        return b'full-audio', b'full-cover'
+        return b'full-audio', b'full-cover', None
 
     async def _fake_clipped(
         url: str,
@@ -534,18 +928,19 @@ async def test_download_audio_as_opus_and_cover_with_max_duration_uses_full_path
     monkeypatch.setattr(ytdlp_module, '_download_audio_as_opus_internal', _fake_internal)
     monkeypatch.setattr(ytdlp_module, '_download_audio_as_opus_clipped', _fake_clipped)
 
-    audio, cover = await ytdlp_module.download_audio_as_opus_and_cover(
+    result = await ytdlp_module.download_audio_as_opus(
         'https://example.com/watch?v=abc',
+        with_cover=True,
         max_duration=timedelta(seconds=30),
     )
 
-    assert audio == b'full-audio'
-    assert cover == b'full-cover'
+    assert result.audio == b'full-audio'
+    assert result.cover == b'full-cover'
     assert observed['clipped_called'] is False
 
 
 @pytest.mark.asyncio
-async def test_download_audio_as_opus_and_cover_with_max_duration_uses_clipped_audio_and_thumbnail_fetch(
+async def test_download_audio_as_opus_with_cover_and_max_duration_uses_clipped_audio_and_thumbnail_fetch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed: dict[str, object] = {'full_called': False}
@@ -557,10 +952,11 @@ async def test_download_audio_as_opus_and_cover_with_max_duration_uses_clipped_a
         url: str,
         *,
         download_cover: bool,
+        with_metadata: bool,
         timeout: timedelta,
-    ) -> tuple[bytes, bytes | None]:
+    ) -> tuple[bytes, bytes | None, ytdlp_module.TrackMetadata | None]:
         observed['full_called'] = True
-        return b'full-audio', b'full-cover'
+        return b'full-audio', b'full-cover', None
 
     async def _fake_clipped(
         url: str,
@@ -594,13 +990,14 @@ async def test_download_audio_as_opus_and_cover_with_max_duration_uses_clipped_a
     monkeypatch.setattr(ytdlp_module, '_download_audio_as_opus_clipped', _fake_clipped)
     monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
 
-    audio, cover = await ytdlp_module.download_audio_as_opus_and_cover(
+    result = await ytdlp_module.download_audio_as_opus(
         'https://example.com/watch?v=abc',
+        with_cover=True,
         max_duration=timedelta(seconds=30),
     )
 
-    assert audio == b'OggS-clipped-audio'
-    assert cover == b'thumb-jpg-bytes'
+    assert result.audio == b'OggS-clipped-audio'
+    assert result.cover == b'thumb-jpg-bytes'
     assert observed['full_called'] is False
     thumb_args = observed['thumb_args']
     assert thumb_args[0] == 'yt-dlp'
@@ -621,23 +1018,26 @@ async def test_download_audio_functions_do_not_probe_duration_when_max_duration_
         url: str,
         *,
         download_cover: bool,
+        with_metadata: bool,
         timeout: timedelta,
-    ) -> tuple[bytes, bytes | None]:
+    ) -> tuple[bytes, bytes | None, ytdlp_module.TrackMetadata | None]:
         if download_cover:
-            return b'full-audio', b'full-cover'
-        return b'full-audio', None
+            return b'full-audio', b'full-cover', None
+        return b'full-audio', None, None
 
     monkeypatch.setattr(ytdlp_module, 'get_media_duration', _unexpected_get_media_duration)
     monkeypatch.setattr(ytdlp_module, '_download_audio_as_opus_internal', _fake_internal)
 
     audio = await ytdlp_module.download_audio_as_opus('https://example.com/watch?v=abc')
-    audio_with_cover, cover = await ytdlp_module.download_audio_as_opus_and_cover(
+    audio_with_cover = await ytdlp_module.download_audio_as_opus(
         'https://example.com/watch?v=abc',
+        with_cover=True,
     )
 
-    assert audio == b'full-audio'
-    assert audio_with_cover == b'full-audio'
-    assert cover == b'full-cover'
+    assert audio.audio == b'full-audio'
+    assert audio.cover is None
+    assert audio_with_cover.audio == b'full-audio'
+    assert audio_with_cover.cover == b'full-cover'
 
 
 @pytest.mark.asyncio
@@ -653,14 +1053,10 @@ async def test_download_audio_functions_reject_non_positive_max_duration() -> No
             max_duration=timedelta(seconds=-1),
         )
     with pytest.raises(ValueError, match='max_duration must be > 0'):
-        await ytdlp_module.download_audio_as_opus_and_cover(
-            'https://example.com/watch?v=abc',
-            max_duration=timedelta(0),
-        )
-    with pytest.raises(ValueError, match='max_duration must be > 0'):
-        await ytdlp_module.download_audio_as_opus_and_cover(
+        await ytdlp_module.download_audio_as_opus(
             'https://example.com/watch?v=abc',
             max_duration=timedelta(seconds=-1),
+            with_cover=True,
         )
 
 
