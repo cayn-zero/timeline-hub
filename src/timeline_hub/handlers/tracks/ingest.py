@@ -23,6 +23,7 @@ from timeline_hub.handlers.menu import (
     validate_flow_state,
 )
 from timeline_hub.handlers.tracks.store_execution import (
+    LinkOnlyTrackInput,
     TrackInputError,
     TrackLinkDownloadError,
     download_link_audio,
@@ -40,6 +41,7 @@ from timeline_hub.handlers.tracks.store_execution import (
     validate_link_only_store_input,
     validate_track_batch,
 )
+from timeline_hub.infra.ytdlp import YtDlpMetadataError
 from timeline_hub.services.container import Services
 from timeline_hub.services.track_store import (
     InvalidTrackIdentityError,
@@ -1140,9 +1142,25 @@ async def _execute_track_store_with_auto_cover(
 
     buffered_messages = services.chat_message_buffer.peek_flat(chat_id)
     try:
-        url, artists, title = prepare_link_only_track_from_buffer(messages=buffered_messages)
+        parsed_link_input = prepare_link_only_track_from_buffer(messages=buffered_messages)
         try:
-            downloaded_audio, downloaded_cover = await download_link_audio_and_cover(url)
+            downloaded_result = await download_link_audio_and_cover(
+                parsed_link_input.url,
+                with_metadata=parsed_link_input.requires_metadata,
+            )
+            artists, title = _resolve_track_link_metadata(
+                parsed_link_input=parsed_link_input,
+                metadata=downloaded_result.metadata,
+            )
+        except YtDlpMetadataError as error:
+            logger.warning(f'Track link metadata unavailable: {error}')
+            await _invalidate_track_intake_buffer(
+                message=message,
+                state=state,
+                services=services,
+                text='No artists and title available',
+            )
+            return
         except TrackLinkDownloadError as error:
             logger.warning(f'Track link download failed: {error}')
             await message.answer(text='Download failed')
@@ -1150,8 +1168,8 @@ async def _execute_track_store_with_auto_cover(
         track = Track(
             artists=artists,
             title=title,
-            audio=downloaded_audio,
-            cover=downloaded_cover,
+            audio=downloaded_result.audio,
+            cover=downloaded_result.cover,
         )
         group = TrackGroup(universe=universe, year=year, season=season)
         await services.track_store.store(group, sub_season, track=track)
@@ -1251,10 +1269,16 @@ async def _execute_track_store_with_album_reuse(
                 messages=buffered_messages,
                 album_id=album_id,
             )
-        except TrackInputError:
-            url, artists, title = prepare_link_only_track_from_buffer(messages=buffered_messages)
+        except TrackInputError as error:
+            parsed_link_input = prepare_link_only_track_from_buffer(messages=buffered_messages)
+            if parsed_link_input.requires_metadata:
+                raise TrackInputError('Invalid input') from error
+            artists = parsed_link_input.artists
+            title = parsed_link_input.title
+            if artists is None or title is None:
+                raise TrackInputError('Invalid input') from error
             try:
-                downloaded_audio = await download_link_audio(url)
+                downloaded_audio = await download_link_audio(parsed_link_input.url)
             except TrackLinkDownloadError:
                 logger.exception('Track link audio download failed')
                 await message.answer(text='Download failed')
@@ -1599,6 +1623,27 @@ def _is_missing_instrumental_error(error: ValueError) -> bool:
 
 def _is_missing_album_error(error: ValueError) -> bool:
     return str(error).startswith('Album id ') and ' does not exist in group ' in str(error)
+
+
+def _resolve_track_link_metadata(
+    *,
+    parsed_link_input: LinkOnlyTrackInput,
+    metadata: object,
+) -> tuple[tuple[str, ...], str]:
+    if not parsed_link_input.requires_metadata:
+        artists = parsed_link_input.artists
+        title = parsed_link_input.title
+        if artists is None or title is None:
+            raise TrackInputError('Invalid input')
+        return artists, title
+
+    if metadata is None:
+        raise YtDlpMetadataError('yt-dlp did not produce metadata output')
+    artists = getattr(metadata, 'artists', None)
+    title = getattr(metadata, 'title', None)
+    if not artists or not title:
+        raise YtDlpMetadataError('yt-dlp produced incomplete metadata output')
+    return tuple(artists), title
 
 
 def _unique_album_options(tracks: list[TrackInfo]) -> list[tuple[str, str]]:

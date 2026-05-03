@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from dataclasses import dataclass
 from urllib.parse import parse_qs, urlparse
 
 from aiogram import Bot
@@ -6,7 +7,7 @@ from aiogram.types import Message
 
 from timeline_hub.infra.ffmpeg import to_opus
 from timeline_hub.infra.images import normalize_cover_to_jpg
-from timeline_hub.infra.ytdlp import download_audio_as_opus
+from timeline_hub.infra.ytdlp import TrackMetadata, YtDlpMetadataError, download_audio_as_opus
 from timeline_hub.services.track_store import Track, TrackGroup, TrackId, TrackStore
 from timeline_hub.types import Extension, FileBytes
 
@@ -17,6 +18,24 @@ class TrackInputError(ValueError):
 
 class TrackLinkDownloadError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class LinkOnlyTrackInput:
+    url: str
+    artists: tuple[str, ...] | None
+    title: str | None
+
+    @property
+    def requires_metadata(self) -> bool:
+        return self.artists is None or self.title is None
+
+
+@dataclass(frozen=True, slots=True)
+class DownloadedLinkAudioCover:
+    audio: FileBytes
+    cover: FileBytes
+    metadata: TrackMetadata | None
 
 
 def extract_single_photo_audio_messages(messages: Sequence[Message]) -> tuple[Message, Message]:
@@ -168,24 +187,28 @@ def is_supported_youtube_store_url(url: str) -> bool:
     return any(video_id.strip() for video_id in video_ids)
 
 
-def parse_link_only_store_input(text: str) -> tuple[str, tuple[str, ...], str]:
+def parse_link_only_store_input(text: str) -> LinkOnlyTrackInput:
     if not isinstance(text, str):
         raise TrackInputError('Invalid input')
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if len(lines) < 3:
+    if not lines:
         raise TrackInputError('Invalid input')
     url = lines[0]
     if not is_supported_youtube_store_url(url):
         raise TrackInputError('Invalid input')
+    if len(lines) == 1:
+        return LinkOnlyTrackInput(url=url, artists=None, title=None)
+    if len(lines) == 2:
+        raise TrackInputError('Invalid input')
     artists = tuple(lines[1:-1])
     title = lines[-1]
-    if not artists or not title:
+    if not artists or any(not artist for artist in artists) or not title:
         raise TrackInputError('Invalid input')
-    return url, artists, title
+    return LinkOnlyTrackInput(url=url, artists=artists, title=title)
 
 
-def validate_link_only_store_input(messages: Sequence[Message]) -> tuple[str, tuple[str, ...], str]:
+def validate_link_only_store_input(messages: Sequence[Message]) -> LinkOnlyTrackInput:
     if len(messages) != 1:
         raise TrackInputError('Invalid input')
     message = messages[0]
@@ -206,16 +229,19 @@ async def download_link_audio(url: str) -> FileBytes:
     return FileBytes(data=result.audio, extension=Extension.OPUS)
 
 
-async def download_link_audio_and_cover(url: str) -> tuple[FileBytes, FileBytes]:
+async def download_link_audio_and_cover(url: str, *, with_metadata: bool = False) -> DownloadedLinkAudioCover:
     try:
-        result = await download_audio_as_opus(url, with_cover=True)
+        result = await download_audio_as_opus(url, with_cover=True, with_metadata=with_metadata)
+    except YtDlpMetadataError:
+        raise
     except Exception as error:
         raise TrackLinkDownloadError(str(error)) from error
     if result.cover is None:
         raise TrackLinkDownloadError('yt-dlp did not produce cover output')
-    return (
-        FileBytes(data=result.audio, extension=Extension.OPUS),
-        FileBytes(data=result.cover, extension=Extension.JPG),
+    return DownloadedLinkAudioCover(
+        audio=FileBytes(data=result.audio, extension=Extension.OPUS),
+        cover=FileBytes(data=result.cover, extension=Extension.JPG),
+        metadata=result.metadata,
     )
 
 
@@ -312,9 +338,8 @@ async def prepare_audio_only_track_from_buffer(
 def prepare_link_only_track_from_buffer(
     *,
     messages: Sequence[Message],
-) -> tuple[str, tuple[str, ...], str]:
-    url, artists, title = validate_link_only_store_input(messages)
-    return url, artists, title
+) -> LinkOnlyTrackInput:
+    return validate_link_only_store_input(messages)
 
 
 def _caption_to_artists_and_title(caption: str | None) -> tuple[tuple[str, ...], str]:
