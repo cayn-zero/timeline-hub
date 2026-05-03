@@ -122,13 +122,17 @@ def test_pad_image_to_width_factor_default_white_centers_content_and_uses_white_
 
     with Image.open(BytesIO(padded_bytes)) as image:
         image.load()
-        assert image.size == (8, 2)
-        left_padding_pixel = image.getpixel((0, 1))
-        content_pixel = image.getpixel((3, 1))
-        right_padding_pixel = image.getpixel((7, 1))
+        assert image.size == (4, 2)
+        left_pixel = image.getpixel((0, 1))
+        content_pixel = image.getpixel((2, 1))
+        right_pixel = image.getpixel((3, 1))
 
-        assert all(channel >= 245 for channel in left_padding_pixel)
-        assert all(channel >= 245 for channel in right_padding_pixel)
+        assert abs(left_pixel[0] - 10) <= 10
+        assert abs(left_pixel[1] - 20) <= 10
+        assert abs(left_pixel[2] - 30) <= 10
+        assert abs(right_pixel[0] - 10) <= 10
+        assert abs(right_pixel[1] - 20) <= 10
+        assert abs(right_pixel[2] - 30) <= 10
         assert abs(content_pixel[0] - 10) <= 10
         assert abs(content_pixel[1] - 20) <= 10
         assert abs(content_pixel[2] - 30) <= 10
@@ -143,13 +147,17 @@ def test_pad_image_to_width_factor_black_background_uses_black_side_padding() ->
 
     with Image.open(BytesIO(padded_bytes)) as image:
         image.load()
-        assert image.size == (8, 2)
-        left_padding_pixel = image.getpixel((0, 1))
-        content_pixel = image.getpixel((3, 1))
-        right_padding_pixel = image.getpixel((7, 1))
+        assert image.size == (4, 2)
+        left_pixel = image.getpixel((0, 1))
+        content_pixel = image.getpixel((2, 1))
+        right_pixel = image.getpixel((3, 1))
 
-        assert all(channel <= 10 for channel in left_padding_pixel)
-        assert all(channel <= 10 for channel in right_padding_pixel)
+        assert abs(left_pixel[0] - 10) <= 10
+        assert abs(left_pixel[1] - 20) <= 10
+        assert abs(left_pixel[2] - 30) <= 10
+        assert abs(right_pixel[0] - 10) <= 10
+        assert abs(right_pixel[1] - 20) <= 10
+        assert abs(right_pixel[2] - 30) <= 10
         assert abs(content_pixel[0] - 10) <= 10
         assert abs(content_pixel[1] - 20) <= 10
         assert abs(content_pixel[2] - 30) <= 10
@@ -168,9 +176,9 @@ def test_pad_image_to_width_factor_blur_background_resizes_and_preserves_centere
     with Image.open(BytesIO(padded_bytes)) as image:
         image.load()
         assert image.format == 'JPEG'
-        assert image.size == (16, 4)
-        left_foreground_pixel = image.getpixel((4, 2))
-        right_foreground_pixel = image.getpixel((11, 2))
+        assert image.size == (8, 4)
+        left_foreground_pixel = image.getpixel((1, 2))
+        right_foreground_pixel = image.getpixel((6, 2))
         assert left_foreground_pixel[0] > left_foreground_pixel[2]
         assert right_foreground_pixel[2] > right_foreground_pixel[0]
 
@@ -185,6 +193,42 @@ def test_pad_image_to_width_factor_one_preserves_dimensions_and_returns_jpeg_byt
         image.load()
         assert image.format == 'JPEG'
         assert image.size == (9, 5)
+
+
+def test_pad_image_to_width_factor_rectangular_narrower_than_target_ratio_pads_to_height_based_width() -> None:
+    jpeg_bytes = _build_jpeg_bytes(size=(12, 8))
+
+    padded_bytes = pad_image_to_width_factor(jpeg_bytes, width_factor=2.0)
+
+    assert padded_bytes.startswith(b'\xff\xd8\xff')
+    with Image.open(BytesIO(padded_bytes)) as image:
+        image.load()
+        assert image.format == 'JPEG'
+        assert image.size == (16, 8)
+
+
+def test_pad_image_to_width_factor_at_target_ratio_keeps_dimensions_with_blur_background() -> None:
+    jpeg_bytes = _build_jpeg_bytes(size=(16, 8))
+
+    padded_bytes = pad_image_to_width_factor(jpeg_bytes, width_factor=2.0, background='blur')
+
+    assert padded_bytes.startswith(b'\xff\xd8\xff')
+    with Image.open(BytesIO(padded_bytes)) as image:
+        image.load()
+        assert image.format == 'JPEG'
+        assert image.size == (16, 8)
+
+
+def test_pad_image_to_width_factor_wider_than_target_ratio_keeps_dimensions() -> None:
+    jpeg_bytes = _build_jpeg_bytes(size=(20, 8))
+
+    padded_bytes = pad_image_to_width_factor(jpeg_bytes, width_factor=2.0)
+
+    assert padded_bytes.startswith(b'\xff\xd8\xff')
+    with Image.open(BytesIO(padded_bytes)) as image:
+        image.load()
+        assert image.format == 'JPEG'
+        assert image.size == (20, 8)
 
 
 @pytest.mark.parametrize(

@@ -79,7 +79,7 @@ def pad_image_to_width_factor(
     background: Literal['white', 'black', 'blur'] = 'white',
     quality: int = 95,
 ) -> bytes:
-    """Pad image bytes to a wider JPEG canvas while preserving source content.
+    """Pad image bytes to a target width:height ratio using a wider JPEG canvas.
 
     Common accepted source formats include JPEG, PNG, WebP, GIF, BMP, and
     TIFF, depending on Pillow support in the runtime environment. Output is
@@ -87,7 +87,7 @@ def pad_image_to_width_factor(
 
     Args:
         image_bytes: Source image bytes in a Pillow-readable format.
-        width_factor: Multiplier used to derive output width from source width.
+        width_factor: Target width:height ratio; pad until width >= height * width_factor.
         background: Background fill strategy for extra horizontal space.
         quality: JPEG quality in the closed range 1..100.
 
@@ -105,7 +105,7 @@ def pad_image_to_width_factor(
         source_image = _normalize_to_rgb(image)
 
         width, height = source_image.size
-        target_width = max(width, round(width * width_factor))
+        target_width = max(width, round(height * width_factor))
         if background == 'white':
             output_image = Image.new('RGB', (target_width, height), 'white')
         elif background == 'black':
