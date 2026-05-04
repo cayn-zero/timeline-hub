@@ -38,6 +38,17 @@ class DownloadedLinkAudioCover:
     metadata: TrackMetadata | None
 
 
+@dataclass(frozen=True, slots=True)
+class CoverLinkTrackInput:
+    url: str
+    artists: tuple[str, ...] | None
+    title: str | None
+
+    @property
+    def requires_metadata(self) -> bool:
+        return self.artists is None or self.title is None
+
+
 def extract_single_photo_audio_messages(messages: Sequence[Message]) -> tuple[Message, Message]:
     """Return exactly one photo message and one audio message, order-independent."""
     if len(messages) != 2:
@@ -219,6 +230,26 @@ def validate_link_only_store_input(messages: Sequence[Message]) -> LinkOnlyTrack
     if message.text is None:
         raise TrackInputError('Invalid input')
     return parse_link_only_store_input(message.text)
+
+
+def parse_cover_link_store_input(messages: Sequence[Message]) -> CoverLinkTrackInput:
+    if len(messages) != 1:
+        raise TrackInputError('Invalid input')
+
+    message = messages[0]
+    if message.photo is None:
+        raise TrackInputError('Invalid input')
+    if message.audio is not None or message.video is not None or getattr(message, 'animation', None) is not None:
+        raise TrackInputError('Invalid input')
+    if message.caption is None:
+        raise TrackInputError('Invalid input')
+    parsed_link_input = parse_link_only_store_input(message.caption)
+
+    return CoverLinkTrackInput(
+        url=parsed_link_input.url,
+        artists=parsed_link_input.artists,
+        title=parsed_link_input.title,
+    )
 
 
 async def download_link_audio(url: str) -> FileBytes:

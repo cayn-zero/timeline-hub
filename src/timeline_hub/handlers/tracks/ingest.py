@@ -23,6 +23,7 @@ from timeline_hub.handlers.menu import (
     validate_flow_state,
 )
 from timeline_hub.handlers.tracks.store_execution import (
+    CoverLinkTrackInput,
     LinkOnlyTrackInput,
     TrackInputError,
     TrackLinkDownloadError,
@@ -33,6 +34,7 @@ from timeline_hub.handlers.tracks.store_execution import (
     extract_store_messages,
     extract_track_identity_from_photo_message,
     is_supported_youtube_store_url,
+    parse_cover_link_store_input,
     prepare_audio_from_message,
     prepare_audio_only_track_from_buffer,
     prepare_link_only_track_from_buffer,
@@ -41,7 +43,8 @@ from timeline_hub.handlers.tracks.store_execution import (
     validate_link_only_store_input,
     validate_track_batch,
 )
-from timeline_hub.infra.ytdlp import YtDlpMetadataError
+from timeline_hub.infra.images import normalize_cover_to_jpg
+from timeline_hub.infra.ytdlp import YtDlpMetadataError, download_audio_as_opus
 from timeline_hub.services.container import Services
 from timeline_hub.services.track_store import (
     InvalidTrackIdentityError,
@@ -59,7 +62,7 @@ from timeline_hub.services.track_store import (
     TrackUpdateManifestSyncError,
 )
 from timeline_hub.settings import Settings
-from timeline_hub.types import InvalidExtensionError
+from timeline_hub.types import Extension, FileBytes, InvalidExtensionError
 
 router = Router()
 _TRACK_STORE_MODE = 'track_store'
@@ -1033,6 +1036,24 @@ async def _on_store_sub_season_selected(
         await handle_stale_selection(message=message, state=state)
         return
 
+    try:
+        parsed_cover_link_input = parse_cover_link_store_input(buffered_messages)
+    except TrackInputError:
+        parsed_cover_link_input = None
+    if parsed_cover_link_input is not None:
+        await _execute_track_store_with_user_cover_link(
+            message=message,
+            state=state,
+            services=services,
+            bot=bot,
+            universe=universe,
+            year=year,
+            season=season,
+            sub_season=sub_season,
+            parsed_cover_link_input=parsed_cover_link_input,
+        )
+        return
+
     if any(buffered_message.photo is not None for buffered_message in buffered_messages):
         await _execute_track_store(
             message=message,
@@ -1173,6 +1194,113 @@ async def _execute_track_store_with_auto_cover(
         )
         group = TrackGroup(universe=universe, year=year, season=season)
         await services.track_store.store(group, sub_season, track=track)
+    except TrackInputError, TrackGroupNotFoundError:
+        await _invalidate_track_intake_buffer(
+            message=message,
+            state=state,
+            services=services,
+            text='Invalid input',
+        )
+        return
+    except Exception:
+        logger.exception('Track store failed')
+        await state.clear()
+        services.chat_message_buffer.flush(chat_id)
+        await message.answer(text='Storing failed\nNo tracks were stored')
+        return
+
+    await state.clear()
+    services.chat_message_buffer.flush(chat_id)
+    await message.answer(text='Done')
+
+
+async def _execute_track_store_with_user_cover_link(
+    *,
+    message: Message,
+    state: FSMContext,
+    services: Services,
+    bot: Bot,
+    universe: TrackUniverse,
+    year: int,
+    season: Season,
+    sub_season: SubSeason,
+    parsed_cover_link_input: CoverLinkTrackInput,
+) -> None:
+    chat_id = message.chat.id
+    expected_version = _buffer_version_from_state(await state.get_data())
+    if services.chat_message_buffer.version(chat_id) != expected_version:
+        await handle_stale_selection(message=message, state=state)
+        return
+
+    await message.edit_text(
+        **selected_text(
+            selected=_selected_store_path(
+                universe=universe,
+                year=year,
+                season=season,
+                sub_season=sub_season,
+            ),
+        ),
+        reply_markup=None,
+    )
+
+    buffered_messages = services.chat_message_buffer.peek_flat(chat_id)
+    try:
+        photo_message = next(
+            (buffered_message for buffered_message in buffered_messages if buffered_message.photo), None
+        )
+        if photo_message is None or not photo_message.photo:
+            raise TrackInputError('Invalid input')
+
+        telegram_file = await bot.get_file(photo_message.photo[-1].file_id)
+        if telegram_file.file_path is None:
+            raise TrackInputError('Invalid input')
+        downloaded_cover = await bot.download_file(telegram_file.file_path)
+        if downloaded_cover is None:
+            raise TrackInputError('Invalid input')
+        cover = normalize_cover_to_jpg(downloaded_cover.read())
+
+        try:
+            downloaded_result = await download_audio_as_opus(
+                parsed_cover_link_input.url,
+                with_cover=False,
+                with_metadata=parsed_cover_link_input.requires_metadata,
+            )
+            link_only_input = LinkOnlyTrackInput(
+                url=parsed_cover_link_input.url,
+                artists=parsed_cover_link_input.artists,
+                title=parsed_cover_link_input.title,
+            )
+            artists, title = _resolve_track_link_metadata(
+                parsed_link_input=link_only_input,
+                metadata=downloaded_result.metadata,
+            )
+        except YtDlpMetadataError as error:
+            logger.warning(f'Track link metadata unavailable: {error}')
+            await _invalidate_track_intake_buffer(
+                message=message,
+                state=state,
+                services=services,
+                text='No artists and title available',
+            )
+            return
+        except Exception as error:
+            logger.warning(f'Track link download failed: {error}')
+            await message.answer(text='Download failed')
+            return
+
+        group = TrackGroup(universe=universe, year=year, season=season)
+        await services.track_store.store(
+            group,
+            sub_season,
+            track=Track(
+                artists=artists,
+                title=title,
+                audio=FileBytes(data=downloaded_result.audio, extension=Extension.OPUS),
+                cover=FileBytes(data=cover, extension=Extension.JPG),
+                album_id=None,
+            ),
+        )
     except TrackInputError, TrackGroupNotFoundError:
         await _invalidate_track_intake_buffer(
             message=message,
@@ -1665,6 +1793,11 @@ def _validate_store_input_at_entry(messages: list[Message]) -> None:
     has_audio = any(message.audio is not None for message in messages)
     if has_video:
         raise TrackInputError('Invalid input')
+    try:
+        _ = parse_cover_link_store_input(messages)
+        return
+    except TrackInputError:
+        pass
     if has_photo:
         validate_track_batch(extract_store_messages(messages))
         return
