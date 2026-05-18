@@ -1,4 +1,5 @@
-from datetime import date
+import math
+from datetime import date, timedelta
 from enum import StrEnum, auto
 from typing import Any
 
@@ -349,6 +350,7 @@ async def on_track_store_menu(
                     message=message,
                     state=state,
                     services=services,
+                    settings=settings,
                     bot=bot,
                     universe=universe,
                     year=year,
@@ -384,6 +386,7 @@ async def on_track_store_menu(
                 message=message,
                 state=state,
                 services=services,
+                settings=settings,
                 bot=bot,
                 universe=universe,
                 year=year,
@@ -1045,6 +1048,7 @@ async def _on_store_sub_season_selected(
             message=message,
             state=state,
             services=services,
+            settings=settings,
             bot=bot,
             universe=universe,
             year=year,
@@ -1098,6 +1102,7 @@ async def _on_store_sub_season_selected(
                 message=message,
                 state=state,
                 services=services,
+                settings=settings,
                 bot=bot,
                 universe=universe,
                 year=year,
@@ -1134,6 +1139,7 @@ async def _execute_track_store_with_auto_cover(
     message: Message,
     state: FSMContext,
     services: Services,
+    settings: Settings,
     bot: Bot,
     universe: TrackUniverse,
     year: int,
@@ -1168,13 +1174,14 @@ async def _execute_track_store_with_auto_cover(
             downloaded_result = await download_link_audio_and_cover(
                 parsed_link_input.url,
                 with_metadata=parsed_link_input.requires_metadata,
+                max_duration=_derived_track_link_source_max_duration(settings),
             )
             artists, title = _resolve_track_link_metadata(
                 parsed_link_input=parsed_link_input,
                 metadata=downloaded_result.metadata,
             )
-        except YtDlpMetadataError as error:
-            logger.warning(f'Track link metadata unavailable: {error}')
+        except YtDlpMetadataError:
+            logger.exception('Track link metadata unavailable')
             await _invalidate_track_intake_buffer(
                 message=message,
                 state=state,
@@ -1182,9 +1189,14 @@ async def _execute_track_store_with_auto_cover(
                 text='No artists and title available',
             )
             return
-        except TrackLinkDownloadError as error:
-            logger.warning(f'Track link download failed: {error}')
-            await message.answer(text='Download failed')
+        except TrackLinkDownloadError:
+            logger.exception('Track link download failed')
+            await _invalidate_track_intake_buffer(
+                message=message,
+                state=state,
+                services=services,
+                text='Download failed',
+            )
             return
         track = Track(
             artists=artists,
@@ -1219,6 +1231,7 @@ async def _execute_track_store_with_user_cover_link(
     message: Message,
     state: FSMContext,
     services: Services,
+    settings: Settings,
     bot: Bot,
     universe: TrackUniverse,
     year: int,
@@ -1265,6 +1278,7 @@ async def _execute_track_store_with_user_cover_link(
                 parsed_cover_link_input.url,
                 with_cover=False,
                 with_metadata=parsed_cover_link_input.requires_metadata,
+                max_duration=_derived_track_link_source_max_duration(settings),
             )
             link_only_input = LinkOnlyTrackInput(
                 url=parsed_cover_link_input.url,
@@ -1275,8 +1289,8 @@ async def _execute_track_store_with_user_cover_link(
                 parsed_link_input=link_only_input,
                 metadata=downloaded_result.metadata,
             )
-        except YtDlpMetadataError as error:
-            logger.warning(f'Track link metadata unavailable: {error}')
+        except YtDlpMetadataError:
+            logger.exception('Track link metadata unavailable')
             await _invalidate_track_intake_buffer(
                 message=message,
                 state=state,
@@ -1284,9 +1298,14 @@ async def _execute_track_store_with_user_cover_link(
                 text='No artists and title available',
             )
             return
-        except Exception as error:
-            logger.warning(f'Track link download failed: {error}')
-            await message.answer(text='Download failed')
+        except Exception:
+            logger.exception('Track link download failed')
+            await _invalidate_track_intake_buffer(
+                message=message,
+                state=state,
+                services=services,
+                text='Download failed',
+            )
             return
 
         group = TrackGroup(universe=universe, year=year, season=season)
@@ -1352,6 +1371,7 @@ async def _execute_track_store_with_album_reuse(
     message: Message,
     state: FSMContext,
     services: Services,
+    settings: Settings,
     bot: Bot,
     universe: TrackUniverse,
     year: int,
@@ -1406,10 +1426,18 @@ async def _execute_track_store_with_album_reuse(
             if artists is None or title is None:
                 raise TrackInputError('Invalid input') from error
             try:
-                downloaded_audio = await download_link_audio(parsed_link_input.url)
+                downloaded_audio = await download_link_audio(
+                    parsed_link_input.url,
+                    max_duration=_derived_track_link_source_max_duration(settings),
+                )
             except TrackLinkDownloadError:
                 logger.exception('Track link audio download failed')
-                await message.answer(text='Download failed')
+                await _invalidate_track_intake_buffer(
+                    message=message,
+                    state=state,
+                    services=services,
+                    text='Download failed',
+                )
                 return
             track = Track(
                 artists=artists,
@@ -1620,6 +1648,19 @@ async def _invalidate_track_intake_buffer(
     if flush_buffer:
         services.chat_message_buffer.flush(message.chat.id)
     await message.edit_text(text, reply_markup=None)
+
+
+def _derived_track_link_source_max_duration(settings: Settings) -> timedelta:
+    """Return a coarse source cap from the final duration and slowest assumed variant speed.
+
+    If presets later generate a speed below `slowest_variant_speed`, link-ingested
+    source audio may be capped too short to produce a full-length variant.
+    """
+    return timedelta(
+        seconds=math.ceil(
+            settings.variant_max_duration.total_seconds() / settings.slowest_variant_speed,
+        )
+    )
 
 
 async def _set_track_store_context(

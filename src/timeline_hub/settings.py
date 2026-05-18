@@ -26,15 +26,20 @@ class Settings(BaseModel):
 
     # Delay used to batch forwarded messages before responding
     forward_batch_timeout: timedelta = timedelta(seconds=0.25)
-
     # Padding line width in space units (1 unit ≈ width of one NBSP character)
     message_width: int = 80
+
     # Lowest year offered for clip store destinations
     min_clip_year: int = 2022
-
     # Audio normalization (LUFS target and bitrate)
     normalization_loudness: float = -14
     normalization_bitrate: int = 128
+
+    # Will be clipped with precision of frames
+    variant_max_duration: timedelta = timedelta(minutes=30)
+    slowest_variant_speed: float = 0.5
+    # Maximum summed variant payload to attempt `send_media_group` (MiB)
+    media_group_max_size: int = 47
 
     model_config = ConfigDict(
         frozen=True,
@@ -71,6 +76,14 @@ class Settings(BaseModel):
         if isinstance(data, dict) and ('user_ids' in data or 'superuser_ids' in data):
             data['user_ids'] = set(data.get('user_ids', [])) | set(data.get('superuser_ids', []))
         return data
+
+    @model_validator(mode='after')
+    def validate_variant_limits(self) -> Self:
+        if self.slowest_variant_speed <= 0 or self.slowest_variant_speed > 1:
+            raise ValueError('slowest_variant_speed must satisfy 0 < slowest_variant_speed <= 1')
+        if self.media_group_max_size <= 0:
+            raise ValueError('media_group_max_size must be > 0')
+        return self
 
 
 class _EnvSettings(BaseSettings):

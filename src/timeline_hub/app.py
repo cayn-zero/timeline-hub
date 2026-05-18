@@ -86,7 +86,11 @@ async def _main(settings: Settings) -> None:
                 task_supervisor=TaskSupervisor(on_failure=on_failure_stop),
             ),
             clip_store=ClipStore(s3_client),
-            track_store=TrackStore(s3_client, preset_store=preset_store),
+            track_store=TrackStore(
+                s3_client,
+                preset_store=preset_store,
+                variant_max_duration=settings.variant_max_duration,
+            ),
         )
         dp['settings'] = settings
         dp['on_failure'] = on_failure_stop

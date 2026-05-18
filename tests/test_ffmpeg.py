@@ -1,7 +1,9 @@
+import asyncio
 import math
 import wave
 from datetime import timedelta
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 
@@ -53,6 +55,36 @@ async def test_create_audio_variant_rejects_out_of_range_mp3_quality() -> None:
             input_sample_rate=48_000,
             output_format='mp3',
             mp3_quality=10,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('max_input_duration', [True, 10])
+async def test_create_audio_variant_rejects_invalid_max_input_duration(
+    max_input_duration: object,
+) -> None:
+    with pytest.raises(ValueError, match='max_input_duration must be a timedelta'):
+        await ffmpeg_module.create_audio_variant(
+            b'source-audio',
+            speed=1.0,
+            reverb=0.0,
+            input_sample_rate=48_000,
+            max_input_duration=max_input_duration,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('max_input_duration', [timedelta(0), timedelta(seconds=-1)])
+async def test_create_audio_variant_rejects_non_positive_max_input_duration(
+    max_input_duration: timedelta,
+) -> None:
+    with pytest.raises(ValueError, match='max_input_duration must be > 0'):
+        await ffmpeg_module.create_audio_variant(
+            b'source-audio',
+            speed=1.0,
+            reverb=0.0,
+            input_sample_rate=48_000,
+            max_input_duration=max_input_duration,
         )
 
 
@@ -119,6 +151,71 @@ async def test_create_audio_variant_builds_slowdown_filter_without_reverb(
         '10',
         '-f',
         'opus',
+        'pipe:1',
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_audio_variant_builds_input_duration_args_before_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    async def _fake_run_ffmpeg(
+        cmd: tuple[str, ...],
+        timeout: timedelta,
+        *,
+        stdin_bytes: bytes | None = None,
+        capture: str = 'none',
+    ) -> bytes:
+        observed['cmd'] = cmd
+        observed['run_timeout'] = timeout
+        observed['stdin_bytes'] = stdin_bytes
+        observed['capture'] = capture
+        return b'variant-audio'
+
+    monkeypatch.setattr(ffmpeg_module, '_run_ffmpeg', _fake_run_ffmpeg)
+
+    result = await ffmpeg_module.create_audio_variant(
+        b'source-audio',
+        speed=0.75,
+        reverb=0.0,
+        input_sample_rate=44_100,
+        max_input_duration=timedelta(seconds=90),
+        output_format='mp3',
+        timeout=timedelta(seconds=12),
+    )
+
+    assert result == b'variant-audio'
+    assert observed['run_timeout'] == timedelta(seconds=12)
+    assert observed['stdin_bytes'] == b'source-audio'
+    assert observed['capture'] == 'stdout'
+    assert observed['cmd'] == (
+        'ffmpeg',
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-nostats',
+        '-nostdin',
+        '-y',
+        '-threads',
+        '1',
+        '-t',
+        '90.0',
+        '-i',
+        'pipe:0',
+        '-vn',
+        '-af',
+        'asetrate=44100*0.75,aresample=48000:resampler=soxr:precision=28:cheby=1,'
+        'equalizer=f=5000:t=q:w=1:g=1,equalizer=f=14000:t=q:w=1:g=-2',
+        '-ar',
+        '48000',
+        '-c:a',
+        'libmp3lame',
+        '-q:a',
+        '1',
+        '-f',
+        'mp3',
         'pipe:1',
     )
 
@@ -626,6 +723,140 @@ async def test_to_opus_rejects_non_ogg_output(
         await ffmpeg_module.to_opus(b'source-audio')
 
 
+@pytest.mark.asyncio
+async def test_clip_mp3_returns_clipped_mp3_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: dict[str, object] = {}
+
+    async def _fake_run_ffmpeg(
+        cmd: tuple[str, ...],
+        timeout: timedelta,
+        *,
+        stdin_bytes: bytes | None = None,
+        capture: str = 'none',
+    ) -> bytes:
+        observed['cmd'] = cmd
+        observed['timeout'] = timeout
+        observed['stdin_bytes'] = stdin_bytes
+        observed['capture'] = capture
+        Path(cmd[-1]).write_bytes(b'ID3\x04\x00\x00\x00\x00\x00\x21fake-mp3')
+        return b''
+
+    monkeypatch.setattr(ffmpeg_module, '_run_ffmpeg', _fake_run_ffmpeg)
+
+    result = await ffmpeg_module.clip_mp3(
+        b'ID3source-mp3',
+        max_duration=timedelta(seconds=90),
+        timeout=timedelta(seconds=11),
+    )
+
+    assert result.startswith(b'ID3')
+    assert observed['timeout'] == timedelta(seconds=11)
+    assert observed['stdin_bytes'] == b'ID3source-mp3'
+    assert observed['capture'] == 'none'
+    observed_cmd = observed['cmd']
+    assert isinstance(observed_cmd, tuple)
+    assert observed_cmd[:-1] == (
+        'ffmpeg',
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-nostats',
+        '-nostdin',
+        '-y',
+        '-threads',
+        '1',
+        '-i',
+        'pipe:0',
+        '-t',
+        '90.0',
+        '-vn',
+        '-c:a',
+        'copy',
+    )
+    assert observed_cmd[-1].endswith('.mp3')
+
+
+@pytest.mark.asyncio
+async def test_clip_mp3_raises_when_ffmpeg_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_run_ffmpeg(
+        cmd: tuple[str, ...],
+        timeout: timedelta,
+        *,
+        stdin_bytes: bytes | None = None,
+        capture: str = 'none',
+    ) -> bytes:
+        raise RuntimeError('ffmpeg failed: invalid input')
+
+    monkeypatch.setattr(ffmpeg_module, '_run_ffmpeg', _fake_run_ffmpeg)
+
+    with pytest.raises(RuntimeError, match='ffmpeg failed: invalid input'):
+        await ffmpeg_module.clip_mp3(
+            b'ID3source-mp3',
+            max_duration=timedelta(seconds=10),
+        )
+
+
+@pytest.mark.asyncio
+async def test_clip_mp3_timeout_kills_process_and_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed = {'killed': False, 'waited': False}
+
+    class _FakeProc:
+        returncode = None
+
+        async def communicate(self, input_data: bytes | None = None) -> tuple[bytes, bytes]:
+            await asyncio.sleep(1)
+            return b'', b''
+
+        def kill(self) -> None:
+            observed['killed'] = True
+
+        async def wait(self) -> int:
+            observed['waited'] = True
+            return 0
+
+    async def _fake_create_subprocess_exec(*args: str, **kwargs: object) -> _FakeProc:
+        return _FakeProc()
+
+    monkeypatch.setattr(ffmpeg_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await ffmpeg_module.clip_mp3(
+            b'ID3source-mp3',
+            max_duration=timedelta(seconds=10),
+            timeout=timedelta(milliseconds=1),
+        )
+
+    assert observed['killed'] is True
+    assert observed['waited'] is True
+
+
+@pytest.mark.asyncio
+async def test_clip_mp3_writes_duration_consistent_seekable_mp3(tmp_path: Path) -> None:
+    source_mp3 = await ffmpeg_module.create_audio_variant(
+        _build_wav_bytes(sample_rate=44_100, duration_seconds=65),
+        speed=1.0,
+        reverb=0.0,
+        input_sample_rate=44_100,
+        output_format='mp3',
+        timeout=timedelta(seconds=20),
+    )
+
+    clipped_mp3 = await ffmpeg_module.clip_mp3(
+        source_mp3,
+        max_duration=timedelta(seconds=30),
+        timeout=timedelta(seconds=20),
+    )
+
+    clipped_path = tmp_path / 'clipped.mp3'
+    clipped_path.write_bytes(clipped_mp3)
+    format_duration = await _probe_format_duration(clipped_path)
+    packet_duration = await _probe_last_packet_time(clipped_path)
+
+    assert format_duration == pytest.approx(30, abs=1)
+    assert packet_duration == pytest.approx(30, abs=1)
+    assert abs(format_duration - packet_duration) <= 1
+
+
 def _build_wav_bytes(*, sample_rate: int, duration_seconds: float = 0.1) -> bytes:
     frame_count = int(sample_rate * duration_seconds)
     amplitude = 12_000
@@ -644,3 +875,50 @@ def _build_wav_bytes(*, sample_rate: int, duration_seconds: float = 0.1) -> byte
         wav_file.writeframes(bytes(frames))
 
     return output.getvalue()
+
+
+async def _probe_format_duration(path: Path) -> float:
+    stdout = await _run_probe(
+        (
+            'ffprobe',
+            '-v',
+            'error',
+            '-show_entries',
+            'format=duration',
+            '-of',
+            'default=nokey=1:noprint_wrappers=1',
+            str(path),
+        )
+    )
+    return float(stdout.decode().strip())
+
+
+async def _probe_last_packet_time(path: Path) -> float:
+    stdout = await _run_probe(
+        (
+            'ffprobe',
+            '-v',
+            'error',
+            '-select_streams',
+            'a:0',
+            '-show_entries',
+            'packet=pts_time',
+            '-of',
+            'csv=p=0',
+            str(path),
+        )
+    )
+    last_packet_time = stdout.decode().strip().splitlines()[-1].rstrip(',')
+    return float(last_packet_time)
+
+
+async def _run_probe(cmd: tuple[str, ...]) -> bytes:
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timedelta(seconds=10).total_seconds())
+    if proc.returncode != 0:
+        raise RuntimeError(f'ffprobe failed: {stderr.decode(errors="replace")}')
+    return stdout

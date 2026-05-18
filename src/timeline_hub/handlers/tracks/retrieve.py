@@ -4,6 +4,7 @@ from enum import StrEnum, auto
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatType
+from aiogram.exceptions import TelegramEntityTooLarge
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -15,6 +16,7 @@ from aiogram.types import (
     Message,
 )
 from aiogram.utils.formatting import Text, TextLink
+from loguru import logger
 
 from timeline_hub.handlers.menu import (
     back_button,
@@ -378,6 +380,7 @@ async def _on_retrieve_select(
                 message=message,
                 state=state,
                 services=services,
+                settings=settings,
                 bot=bot,
                 group=TrackGroup(universe=universe, year=year, season=season),
                 sub_season=sub_season,
@@ -704,6 +707,7 @@ async def _execute_track_get(
     message: Message,
     state: FSMContext,
     services: Services,
+    settings: Settings,
     bot: Bot,
     group: TrackGroup,
     sub_season: SubSeason,
@@ -756,6 +760,7 @@ async def _execute_track_get(
             chat_id=message.chat.id,
             group=group,
             fetched_track=fetched_track,
+            settings=settings,
         )
 
 
@@ -765,6 +770,7 @@ async def _send_fetched_track(
     chat_id: int,
     group: TrackGroup,
     fetched_track: FetchedVariants,
+    settings: Settings,
 ) -> None:
     _validate_variant_count(fetched_track.variants)
     if fetched_track.instrumental_variants is not None:
@@ -796,12 +802,14 @@ async def _send_fetched_track(
         bot=bot,
         chat_id=chat_id,
         variants=fetched_track.variants,
+        media_group_max_size_mib=settings.media_group_max_size,
     )
     if fetched_track.instrumental_variants is not None:
         await _send_variant_audio(
             bot=bot,
             chat_id=chat_id,
             variants=fetched_track.instrumental_variants,
+            media_group_max_size_mib=settings.media_group_max_size,
         )
 
 
@@ -810,31 +818,70 @@ async def _send_variant_audio(
     bot: Bot,
     chat_id: int,
     variants: Sequence[FetchedVariant],
+    media_group_max_size_mib: int,
 ) -> None:
     _validate_variant_count(variants)
-
     if len(variants) == 1:
-        await bot.send_audio(
+        await _send_variants_sequential(
+            bot=bot,
             chat_id=chat_id,
-            audio=BufferedInputFile(
-                variants[0].audio.data,
-                filename=_variant_filename(variants[0]),
-            ),
+            variants=variants,
         )
         return
 
-    await bot.send_media_group(
-        chat_id=chat_id,
-        media=[
-            InputMediaAudio(
-                media=BufferedInputFile(
-                    variant.audio.data,
-                    filename=_variant_filename(variant),
-                ),
+    media_group_max_bytes = media_group_max_size_mib * 1024 * 1024
+    sizes = [len(variant.audio.data) for variant in variants]
+    total_size = sum(sizes)
+    sizes_mib = [round(size / (1024 * 1024), 3) for size in sizes]
+    total_size_mib = round(total_size / (1024 * 1024), 3)
+
+    if total_size <= media_group_max_bytes:
+        try:
+            await bot.send_media_group(
+                chat_id=chat_id,
+                media=[
+                    InputMediaAudio(
+                        media=BufferedInputFile(
+                            variant.audio.data,
+                            filename=_variant_filename(variant),
+                        ),
+                    )
+                    for variant in variants
+                ],
             )
-            for variant in variants
-        ],
+            return
+        except TelegramEntityTooLarge:
+            logger.warning(
+                (
+                    'Track variant media group too large; falling back to sequential send '
+                    '(count={}, total_mib={}, threshold_mib={}, sizes_mib={})'
+                ),
+                len(variants),
+                total_size_mib,
+                media_group_max_size_mib,
+                sizes_mib,
+            )
+    await _send_variants_sequential(
+        bot=bot,
+        chat_id=chat_id,
+        variants=variants,
     )
+
+
+async def _send_variants_sequential(
+    *,
+    bot: Bot,
+    chat_id: int,
+    variants: Sequence[FetchedVariant],
+) -> None:
+    for variant in variants:
+        await bot.send_audio(
+            chat_id=chat_id,
+            audio=BufferedInputFile(
+                variant.audio.data,
+                filename=_variant_filename(variant),
+            ),
+        )
 
 
 async def _show_retrieve_entry_menu(

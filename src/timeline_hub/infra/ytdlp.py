@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import tempfile
 from dataclasses import dataclass
@@ -86,18 +87,18 @@ async def _download_audio(
         )
         return DownloadedAudio(audio=audio, cover=cover, metadata=metadata)
 
-    if with_metadata:
-        raise YtDlpMetadataError('yt-dlp metadata is not supported for clipped downloads')
-
     audio = await _download_audio_as_opus_clipped(
         url,
         max_duration=max_duration,
         timeout=timeout,
     )
+    metadata: TrackMetadata | None = None
+    if with_metadata:
+        metadata = await _download_track_metadata(url, timeout=timeout)
     if with_cover:
         cover = await _download_cover_as_jpg(url, timeout=timeout)
-        return DownloadedAudio(audio=audio, cover=cover)
-    return DownloadedAudio(audio=audio)
+        return DownloadedAudio(audio=audio, cover=cover, metadata=metadata)
+    return DownloadedAudio(audio=audio, metadata=metadata)
 
 
 async def get_media_duration(
@@ -175,7 +176,7 @@ async def _download_audio_as_opus_internal(
         args: list[str] = [
             'yt-dlp',
             '-f',
-            'bestaudio[acodec=opus]/bestaudio',
+            'bestaudio',
             '--extract-audio',
             '--audio-format',
             'opus',
@@ -344,12 +345,83 @@ async def _download_cover_as_jpg(
         return cover_bytes
 
 
+async def _download_track_metadata(
+    url: str,
+    *,
+    timeout: timedelta,
+) -> TrackMetadata:
+    normalized_url = _normalize_url(url)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        output_template = Path(temp_dir) / 'metadata.%(ext)s'
+        proc = await asyncio.create_subprocess_exec(
+            'yt-dlp',
+            '--skip-download',
+            '--write-info-json',
+            '--quiet',
+            '--no-warnings',
+            '--no-playlist',
+            '-o',
+            str(output_template),
+            normalized_url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        try:
+            _, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=timeout.total_seconds(),
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise
+
+        if proc.returncode != 0:
+            stderr_text = stderr.decode(errors='replace')
+            raise RuntimeError(f'yt-dlp failed: {stderr_text}')
+
+        metadata_files = sorted(Path(temp_dir).glob('*.info.json'))
+        if not metadata_files:
+            raise YtDlpMetadataError('yt-dlp did not produce metadata output')
+        if len(metadata_files) > 1:
+            raise YtDlpMetadataError('yt-dlp produced multiple metadata outputs')
+        try:
+            metadata_obj = json.loads(metadata_files[0].read_text())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise YtDlpMetadataError('yt-dlp produced invalid metadata output') from error
+        if not isinstance(metadata_obj, dict):
+            raise YtDlpMetadataError('yt-dlp produced invalid metadata output')
+        return _parse_track_metadata(metadata_obj)
+
+
 async def _download_audio_as_opus_clipped(
     url: str,
     *,
     max_duration: timedelta,
     timeout: timedelta,
 ) -> bytes:
+    async def _stop_process(proc: asyncio.subprocess.Process, *, grace_seconds: float) -> None:
+        if proc.returncode is not None:
+            return
+        terminate = getattr(proc, 'terminate', None)
+        if callable(terminate):
+            with contextlib.suppress(ProcessLookupError):
+                terminate()
+        else:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=grace_seconds)
+            return
+        except asyncio.TimeoutError:
+            pass
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
+
     normalized_url = _normalize_url(url)
     _validate_max_duration(max_duration)
     max_duration_seconds = str(max_duration.total_seconds())
@@ -357,7 +429,7 @@ async def _download_audio_as_opus_clipped(
     ytdlp_proc = await asyncio.create_subprocess_exec(
         'yt-dlp',
         '-f',
-        'bestaudio[acodec=opus]/bestaudio',
+        'bestaudio',
         '--quiet',
         '--no-warnings',
         '--no-playlist',
@@ -414,15 +486,31 @@ async def _download_audio_as_opus_clipped(
     )
     try:
         async with asyncio.timeout(timeout.total_seconds()):
-            await asyncio.gather(*tasks)
-            ffmpeg_stdout = ffmpeg_stdout_task.result()
-            ffmpeg_stderr = ffmpeg_stderr_task.result()
-            ytdlp_stderr = await ytdlp_stderr_task
+            await ffmpeg_wait_task
             ffmpeg_returncode = ffmpeg_wait_task.result()
-            ytdlp_returncode = ytdlp_wait_task.result()
+            ffmpeg_stdout = await ffmpeg_stdout_task
+            ffmpeg_stderr = await ffmpeg_stderr_task
+
+            if ffmpeg_returncode == 0 and ffmpeg_stdout and ffmpeg_stdout.startswith(b'OggS'):
+                await _stop_process(ytdlp_proc, grace_seconds=1.0)
+                return ffmpeg_stdout
+
+            ytdlp_returncode = ytdlp_proc.returncode
+            if ytdlp_returncode is None:
+                try:
+                    ytdlp_returncode = await asyncio.wait_for(ytdlp_wait_task, timeout=1.0)
+                except asyncio.TimeoutError:
+                    ytdlp_returncode = None
+            if ytdlp_stderr_task.done():
+                ytdlp_stderr = ytdlp_stderr_task.result()
+            else:
+                try:
+                    ytdlp_stderr = await asyncio.wait_for(ytdlp_stderr_task, timeout=1.0)
+                except asyncio.TimeoutError:
+                    ytdlp_stderr = b''
     except asyncio.TimeoutError:
-        ytdlp_proc.kill()
-        ffmpeg_proc.kill()
+        await _stop_process(ytdlp_proc, grace_seconds=0.1)
+        await _stop_process(ffmpeg_proc, grace_seconds=0.1)
         await asyncio.gather(
             ytdlp_proc.wait(),
             ffmpeg_proc.wait(),
@@ -439,14 +527,14 @@ async def _download_audio_as_opus_clipped(
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    if ffmpeg_returncode != 0:
-        stderr_text = ffmpeg_stderr.decode(errors='replace')
-        raise RuntimeError(f'ffmpeg failed: {stderr_text}')
-
-    if ytdlp_returncode != 0:
+    if ytdlp_returncode not in (None, 0):
         ytdlp_stderr_text = ytdlp_stderr.decode(errors='replace')
         if 'broken pipe' not in ytdlp_stderr_text.lower():
             raise RuntimeError(f'yt-dlp failed: {ytdlp_stderr_text}')
+
+    if ffmpeg_returncode != 0:
+        stderr_text = ffmpeg_stderr.decode(errors='replace')
+        raise RuntimeError(f'ffmpeg failed: {stderr_text}')
 
     if not ffmpeg_stdout or not ffmpeg_stdout.startswith(b'OggS'):
         raise RuntimeError('yt-dlp output is not a valid Ogg/Opus container')
@@ -467,5 +555,8 @@ async def _pipe_stream(
     except BrokenPipeError, ConnectionResetError:
         return
     finally:
-        destination.close()
-        await destination.wait_closed()
+        try:
+            destination.close()
+            await destination.wait_closed()
+        except BrokenPipeError, ConnectionResetError:
+            pass

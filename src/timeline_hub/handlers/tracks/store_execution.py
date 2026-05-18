@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from urllib.parse import parse_qs, urlparse
 
 from aiogram import Bot
@@ -190,8 +191,11 @@ def is_supported_youtube_store_url(url: str) -> bool:
     parsed = urlparse(normalized_url)
     if parsed.scheme != 'https':
         return False
-    if parsed.netloc not in ('www.youtube.com', 'music.youtube.com'):
+    if parsed.netloc not in ('www.youtube.com', 'music.youtube.com', 'youtu.be'):
         return False
+    if parsed.netloc == 'youtu.be':
+        path_segments = [segment for segment in parsed.path.split('/') if segment]
+        return len(path_segments) == 1
     if parsed.path != '/watch':
         return False
     video_ids = parse_qs(parsed.query).get('v', [])
@@ -252,17 +256,27 @@ def parse_cover_link_store_input(messages: Sequence[Message]) -> CoverLinkTrackI
     )
 
 
-async def download_link_audio(url: str) -> FileBytes:
+async def download_link_audio(url: str, *, max_duration: timedelta | None = None) -> FileBytes:
     try:
-        result = await download_audio_as_opus(url)
+        result = await download_audio_as_opus(url, max_duration=max_duration)
     except Exception as error:
         raise TrackLinkDownloadError("Can't process audio") from error
     return FileBytes(data=result.audio, extension=Extension.OPUS)
 
 
-async def download_link_audio_and_cover(url: str, *, with_metadata: bool = False) -> DownloadedLinkAudioCover:
+async def download_link_audio_and_cover(
+    url: str,
+    *,
+    with_metadata: bool = False,
+    max_duration: timedelta | None = None,
+) -> DownloadedLinkAudioCover:
     try:
-        result = await download_audio_as_opus(url, with_cover=True, with_metadata=with_metadata)
+        result = await download_audio_as_opus(
+            url,
+            with_cover=True,
+            with_metadata=with_metadata,
+            max_duration=max_duration,
+        )
     except YtDlpMetadataError:
         raise
     except Exception as error:

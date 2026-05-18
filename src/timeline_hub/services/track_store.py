@@ -5,10 +5,11 @@ import uuid
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
+from datetime import timedelta
 from enum import IntEnum, StrEnum
 from typing import Self, TypeVar
 
-from timeline_hub.infra.ffmpeg import create_audio_variant, probe_audio_sample_rate
+from timeline_hub.infra.ffmpeg import clip_mp3, create_audio_variant, probe_audio_sample_rate
 from timeline_hub.infra.s3 import Key, Prefix, S3BatchDeleteError, S3Client, S3ContentType, S3ObjectNotFoundError
 from timeline_hub.types import Extension, FileBytes, InvalidExtensionError
 
@@ -1030,7 +1031,13 @@ class TrackStore:
         - `fetch()` returns generated variants only and may lazily regenerate stale caches.
     """
 
-    def __init__(self, s3_client: S3Client, *, preset_store: PresetStore) -> None:
+    def __init__(
+        self,
+        s3_client: S3Client,
+        *,
+        preset_store: PresetStore,
+        variant_max_duration: timedelta,
+    ) -> None:
         """Initialize the store with an opened generic S3 client and preset store.
 
         The caller constructs and owns the `PresetStore` instance passed here.
@@ -1040,6 +1047,7 @@ class TrackStore:
 
         self._s3_client = s3_client
         self._preset_store = preset_store
+        self._variant_max_duration = variant_max_duration
         self._manifest_cache: dict[Prefix, Manifest] = {}
 
     async def list_groups(self) -> list[TrackGroup]:
@@ -2605,12 +2613,18 @@ class TrackStore:
         source_sample_rate = await probe_audio_sample_rate(source_bytes)
         variants: list[FetchedVariant] = []
         for index, spec in enumerate(variant_specs, start=1):
+            variant_input_max_duration = self._variant_max_duration * spec.speed
             generated_bytes = await create_audio_variant(
                 source_bytes,
                 speed=spec.speed,
                 reverb=spec.reverb,
                 input_sample_rate=source_sample_rate,
+                max_input_duration=variant_input_max_duration,
                 output_format='mp3',
+            )
+            generated_bytes = await clip_mp3(
+                generated_bytes,
+                max_duration=self._variant_max_duration,
             )
             variant_key = self._variant_storage_key(
                 track_group_prefix=track_group_prefix,

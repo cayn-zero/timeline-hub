@@ -74,16 +74,83 @@ async def to_opus(
     return output
 
 
+async def clip_mp3(
+    audio: bytes,
+    *,
+    max_duration: timedelta,
+    timeout: timedelta = timedelta(minutes=2),
+) -> bytes:
+    """Clip MP3 bytes to a maximum duration and finalize seekable metadata.
+
+    Args:
+        audio: Source MP3 bytes.
+        max_duration: Maximum output duration.
+        timeout: Maximum time allowed for the ffmpeg subprocess run.
+
+    Raises:
+        ValueError: If parameters are invalid.
+        RuntimeError: If ffmpeg fails or output validation fails.
+    """
+    if not audio:
+        raise ValueError('audio must not be empty')
+
+    if isinstance(max_duration, bool) or not isinstance(max_duration, timedelta):
+        raise ValueError('max_duration must be a timedelta')
+    if max_duration <= timedelta(0):
+        raise ValueError('max_duration must be > 0')
+
+    output_fd, output_name = tempfile.mkstemp(suffix='.mp3')
+    os.close(output_fd)
+    output_path = Path(output_name)
+
+    try:
+        cmd = (
+            'ffmpeg',
+            '-hide_banner',
+            '-loglevel',
+            'error',
+            '-nostats',
+            '-nostdin',
+            '-y',
+            '-threads',
+            '1',
+            '-i',
+            'pipe:0',
+            '-t',
+            str(max_duration.total_seconds()),
+            '-vn',
+            '-c:a',
+            'copy',
+            str(output_path),
+        )
+        await _run_ffmpeg(
+            cmd,
+            timeout,
+            stdin_bytes=audio,
+            capture='none',
+        )
+        output = output_path.read_bytes()
+        if not output:
+            raise RuntimeError('ffmpeg produced empty MP3 output')
+        is_mp3 = output.startswith(b'ID3') or (len(output) >= 2 and output[0] == 0xFF and (output[1] & 0xE0) == 0xE0)
+        if not is_mp3:
+            raise RuntimeError('ffmpeg output is not a valid MP3 stream')
+        return output
+    finally:
+        output_path.unlink(missing_ok=True)
+
+
 async def create_audio_variant(
     audio_bytes: bytes,
     *,
     speed: float,
     reverb: float,
     input_sample_rate: int,
+    max_input_duration: timedelta | None = None,
     output_format: Literal['opus', 'mp3'] = 'opus',
     opus_bitrate: int = 160,
     mp3_quality: int = 1,
-    timeout: timedelta = timedelta(seconds=30),
+    timeout: timedelta = timedelta(minutes=3),
 ) -> bytes:
     """Return an audio variant generated from source audio bytes.
 
@@ -108,6 +175,8 @@ async def create_audio_variant(
         speed: Playback speed multiplier. Must be > 0.
         reverb: Reverb intensity in the closed range 0..1.
         input_sample_rate: Source audio sample rate in Hz.
+        max_input_duration: Optional maximum source duration to process before
+            applying speed, filtering, and reverb.
         output_format: Target output format. Supported values are `'opus'`
             and `'mp3'`.
         opus_bitrate: Target Opus bitrate in kbps. Used only when
@@ -157,6 +226,17 @@ async def create_audio_variant(
         raise ValueError('mp3_quality must be an integer')
     if not 0 <= mp3_quality <= 9:
         raise ValueError('mp3_quality must be in 0..9')
+
+    input_duration_args: tuple[str, ...] = ()
+    if max_input_duration is not None:
+        if isinstance(max_input_duration, bool) or not isinstance(max_input_duration, timedelta):
+            raise ValueError('max_input_duration must be a timedelta')
+        if max_input_duration <= timedelta(0):
+            raise ValueError('max_input_duration must be > 0')
+        input_duration_args = (
+            '-t',
+            str(max_input_duration.total_seconds()),
+        )
 
     if output_format == 'opus':
         output_sample_rate = 48_000
@@ -220,6 +300,7 @@ async def create_audio_variant(
         '-y',
         '-threads',
         '1',
+        *input_duration_args,
         '-i',
         'pipe:0',
         '-vn',

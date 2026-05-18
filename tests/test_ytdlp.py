@@ -50,7 +50,7 @@ async def test_download_audio_as_opus_builds_expected_command_and_returns_bytes(
     args = observed['args']
     assert args[0] == 'yt-dlp'
     assert '-f' in args
-    assert 'bestaudio[acodec=opus]/bestaudio' in args
+    assert args[args.index('-f') + 1] == 'bestaudio'
     assert '--extract-audio' in args
     assert '--audio-format' in args
     assert 'opus' in args
@@ -880,20 +880,88 @@ async def test_download_audio_as_opus_with_max_duration_uses_clipped_path_for_un
 
 
 @pytest.mark.asyncio
-async def test_download_audio_as_opus_with_metadata_rejects_clipped_downloads(
+async def test_download_audio_as_opus_with_metadata_uses_clipped_audio_and_fetches_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    async def _fake_get_media_duration(url: str, *, timeout: timedelta) -> timedelta | None:
+        return timedelta(seconds=31)
+
+    async def _fake_clipped(
+        url: str,
+        *,
+        max_duration: timedelta,
+        timeout: timedelta,
+    ) -> bytes:
+        observed['clipped_called'] = True
+        return b'OggS-clipped-audio'
+
+    async def _fake_metadata(
+        url: str,
+        *,
+        timeout: timedelta,
+    ) -> ytdlp_module.TrackMetadata:
+        observed['metadata_called'] = True
+        return ytdlp_module.TrackMetadata(artists=('Artist 1',), title='Song 1')
+
+    monkeypatch.setattr(ytdlp_module, 'get_media_duration', _fake_get_media_duration)
+    monkeypatch.setattr(ytdlp_module, '_download_audio_as_opus_clipped', _fake_clipped)
+    monkeypatch.setattr(ytdlp_module, '_download_track_metadata', _fake_metadata)
+
+    result = await ytdlp_module.download_audio_as_opus(
+        'https://example.com/watch?v=abc',
+        with_metadata=True,
+        max_duration=timedelta(seconds=30),
+    )
+
+    assert result.audio == b'OggS-clipped-audio'
+    assert result.cover is None
+    assert result.metadata == ytdlp_module.TrackMetadata(artists=('Artist 1',), title='Song 1')
+    assert observed['clipped_called'] is True
+    assert observed['metadata_called'] is True
+
+
+@pytest.mark.asyncio
+async def test_download_audio_as_opus_with_cover_and_metadata_and_max_duration_uses_clipped_audio_and_fetches_cover(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _fake_get_media_duration(url: str, *, timeout: timedelta) -> timedelta | None:
         return timedelta(seconds=31)
 
-    monkeypatch.setattr(ytdlp_module, 'get_media_duration', _fake_get_media_duration)
+    async def _fake_clipped(
+        url: str,
+        *,
+        max_duration: timedelta,
+        timeout: timedelta,
+    ) -> bytes:
+        return b'OggS-clipped-audio'
 
-    with pytest.raises(YtDlpMetadataError, match='yt-dlp metadata is not supported for clipped downloads'):
-        await ytdlp_module.download_audio_as_opus(
-            'https://example.com/watch?v=abc',
-            with_metadata=True,
-            max_duration=timedelta(seconds=30),
-        )
+    async def _fake_metadata(
+        url: str,
+        *,
+        timeout: timedelta,
+    ) -> ytdlp_module.TrackMetadata:
+        return ytdlp_module.TrackMetadata(artists=('Artist 1',), title='Song 1')
+
+    async def _fake_cover(url: str, *, timeout: timedelta) -> bytes:
+        return b'cover-jpg'
+
+    monkeypatch.setattr(ytdlp_module, 'get_media_duration', _fake_get_media_duration)
+    monkeypatch.setattr(ytdlp_module, '_download_audio_as_opus_clipped', _fake_clipped)
+    monkeypatch.setattr(ytdlp_module, '_download_track_metadata', _fake_metadata)
+    monkeypatch.setattr(ytdlp_module, '_download_cover_as_jpg', _fake_cover)
+
+    result = await ytdlp_module.download_audio_as_opus(
+        'https://example.com/watch?v=abc',
+        with_cover=True,
+        with_metadata=True,
+        max_duration=timedelta(seconds=30),
+    )
+
+    assert result.audio == b'OggS-clipped-audio'
+    assert result.cover == b'cover-jpg'
+    assert result.metadata == ytdlp_module.TrackMetadata(artists=('Artist 1',), title='Song 1')
 
 
 @pytest.mark.asyncio
@@ -1132,6 +1200,8 @@ async def test_download_audio_as_opus_clipped_builds_pipeline_and_returns_bytes(
     ffmpeg_args = observed['ffmpeg']
     assert '-o' in ytdlp_args
     assert ytdlp_args[ytdlp_args.index('-o') + 1] == '-'
+    assert '-f' in ytdlp_args
+    assert ytdlp_args[ytdlp_args.index('-f') + 1] == 'bestaudio'
     assert 'pipe:0' in ffmpeg_args
     assert '-t' in ffmpeg_args
     assert ffmpeg_args[ffmpeg_args.index('-t') + 1] == '15.0'
@@ -1203,7 +1273,7 @@ async def test_download_audio_as_opus_clipped_tolerates_ytdlp_broken_pipe(
 
 
 @pytest.mark.asyncio
-async def test_download_audio_as_opus_clipped_raises_when_ytdlp_fails_without_broken_pipe(
+async def test_download_audio_as_opus_clipped_returns_success_when_ffmpeg_succeeds_even_if_ytdlp_nonzero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _FakeReader:
@@ -1249,7 +1319,62 @@ async def test_download_audio_as_opus_clipped_raises_when_ytdlp_fails_without_br
     monkeypatch.setattr(ytdlp_module, '_pipe_stream', _fake_pipe_stream)
     monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
 
-    with pytest.raises(RuntimeError, match=re.escape('yt-dlp failed: network error')):
+    result = await ytdlp_module._download_audio_as_opus_clipped(
+        'https://example.com/watch?v=abc',
+        max_duration=timedelta(seconds=15),
+        timeout=timedelta(seconds=10),
+    )
+    assert result == b'OggS-clipped'
+
+
+@pytest.mark.asyncio
+async def test_download_audio_as_opus_clipped_prefers_ytdlp_error_when_both_processes_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeReader:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+
+        async def read(self) -> bytes:
+            return self._payload
+
+    class _YtDlpProc:
+        def __init__(self) -> None:
+            self.returncode = 2
+            self.stdout = object()
+            self.stderr = _FakeReader(b'ytdlp boom')
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    class _FfmpegProc:
+        def __init__(self) -> None:
+            self.returncode = 183
+            self.stdin = object()
+            self.stdout = _FakeReader(b'')
+            self.stderr = _FakeReader(b'Invalid data found when processing input')
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def _fake_pipe_stream(source: object, destination: object) -> None:
+        return None
+
+    async def _fake_create_subprocess_exec(*args: str, **kwargs: object) -> object:
+        if args[0] == 'yt-dlp':
+            return _YtDlpProc()
+        return _FfmpegProc()
+
+    monkeypatch.setattr(ytdlp_module, '_pipe_stream', _fake_pipe_stream)
+    monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+
+    with pytest.raises(RuntimeError, match=re.escape('yt-dlp failed: ytdlp boom')):
         await ytdlp_module._download_audio_as_opus_clipped(
             'https://example.com/watch?v=abc',
             max_duration=timedelta(seconds=15),
@@ -1393,7 +1518,9 @@ async def test_download_audio_as_opus_clipped_timeout_kills_and_waits_for_both_p
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed = {
+        'ytdlp_terminated': False,
         'ytdlp_killed': False,
+        'ffmpeg_terminated': False,
         'ffmpeg_killed': False,
         'ytdlp_waited': False,
         'ffmpeg_waited': False,
@@ -1409,29 +1536,172 @@ async def test_download_audio_as_opus_clipped_timeout_kills_and_waits_for_both_p
 
     class _YtDlpProc:
         def __init__(self) -> None:
-            self.returncode = 0
+            self.returncode = None
             self.stdout = object()
             self.stderr = _FakeReader()
 
+        def terminate(self) -> None:
+            observed['ytdlp_terminated'] = True
+            self.returncode = 0
+
         def kill(self) -> None:
             observed['ytdlp_killed'] = True
+            self.returncode = -9
 
         async def wait(self) -> int:
             observed['ytdlp_waited'] = True
+            return 0 if self.returncode is None else self.returncode
+
+    class _FfmpegProc:
+        def __init__(self) -> None:
+            self.returncode = None
+            self.stdin = object()
+            self.stdout = _FakeReader()
+            self.stderr = _FakeReader()
+
+        def terminate(self) -> None:
+            observed['ffmpeg_terminated'] = True
+            self.returncode = 0
+
+        def kill(self) -> None:
+            observed['ffmpeg_killed'] = True
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            observed['ffmpeg_waited'] = True
+            return 0 if self.returncode is None else self.returncode
+
+    async def _fake_pipe_stream(source: object, destination: object) -> None:
+        await asyncio.sleep(1)
+
+    async def _fake_create_subprocess_exec(*args: str, **kwargs: object) -> object:
+        if args[0] == 'yt-dlp':
+            return _YtDlpProc()
+        return _FfmpegProc()
+
+    monkeypatch.setattr(ytdlp_module, '_pipe_stream', _fake_pipe_stream)
+    monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await ytdlp_module._download_audio_as_opus_clipped(
+            'https://example.com/watch?v=abc',
+            max_duration=timedelta(seconds=15),
+            timeout=timedelta(milliseconds=1),
+        )
+
+    assert observed['ytdlp_terminated'] is True or observed['ytdlp_killed'] is True
+    assert observed['ffmpeg_terminated'] is True or observed['ffmpeg_killed'] is True
+    assert observed['ytdlp_waited'] is True
+    assert observed['ffmpeg_waited'] is True
+
+
+@pytest.mark.asyncio
+async def test_download_audio_as_opus_clipped_success_terminates_hanging_ytdlp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = {
+        'ytdlp_terminated': False,
+        'ytdlp_killed': False,
+    }
+
+    class _FakeReader:
+        def __init__(self, payload: bytes = b'') -> None:
+            self._payload = payload
+
+        async def read(self) -> bytes:
+            return self._payload
+
+    class _YtDlpProc:
+        def __init__(self) -> None:
+            self.returncode = None
+            self.stdout = object()
+            self.stderr = _FakeReader()
+
+        def terminate(self) -> None:
+            observed['ytdlp_terminated'] = True
+            self.returncode = 0
+
+        def kill(self) -> None:
+            observed['ytdlp_killed'] = True
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            while self.returncode is None:
+                await asyncio.sleep(0.01)
             return self.returncode
 
     class _FfmpegProc:
         def __init__(self) -> None:
             self.returncode = 0
             self.stdin = object()
+            self.stdout = _FakeReader(b'OggS-clipped')
+            self.stderr = _FakeReader(b'')
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def _fake_pipe_stream(source: object, destination: object) -> None:
+        return None
+
+    async def _fake_create_subprocess_exec(*args: str, **kwargs: object) -> object:
+        if args[0] == 'yt-dlp':
+            return _YtDlpProc()
+        return _FfmpegProc()
+
+    monkeypatch.setattr(ytdlp_module, '_pipe_stream', _fake_pipe_stream)
+    monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+
+    result = await ytdlp_module._download_audio_as_opus_clipped(
+        'https://example.com/watch?v=abc',
+        max_duration=timedelta(seconds=15),
+        timeout=timedelta(seconds=2),
+    )
+
+    assert result.startswith(b'OggS')
+    assert observed['ytdlp_terminated'] is True
+    assert observed['ytdlp_killed'] is False
+
+
+@pytest.mark.asyncio
+async def test_download_audio_as_opus_clipped_timeout_cleanup_ignores_process_lookup_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeReader:
+        async def read(self) -> bytes:
+            await asyncio.sleep(1)
+            return b''
+
+    class _YtDlpProc:
+        def __init__(self) -> None:
+            self.returncode = None
+            self.stdout = object()
+            self.stderr = _FakeReader()
+
+        def terminate(self) -> None:
+            raise ProcessLookupError
+
+        def kill(self) -> None:
+            raise ProcessLookupError
+
+        async def wait(self) -> int:
+            self.returncode = 0
+            return self.returncode
+
+    class _FfmpegProc:
+        def __init__(self) -> None:
+            self.returncode = None
+            self.stdin = object()
             self.stdout = _FakeReader()
             self.stderr = _FakeReader()
 
+        def terminate(self) -> None:
+            raise ProcessLookupError
+
         def kill(self) -> None:
-            observed['ffmpeg_killed'] = True
+            raise ProcessLookupError
 
         async def wait(self) -> int:
-            observed['ffmpeg_waited'] = True
+            self.returncode = 0
             return self.returncode
 
     async def _fake_pipe_stream(source: object, destination: object) -> None:
@@ -1452,7 +1722,146 @@ async def test_download_audio_as_opus_clipped_timeout_kills_and_waits_for_both_p
             timeout=timedelta(milliseconds=1),
         )
 
-    assert observed['ytdlp_killed'] is True
-    assert observed['ffmpeg_killed'] is True
-    assert observed['ytdlp_waited'] is True
-    assert observed['ffmpeg_waited'] is True
+
+@pytest.mark.asyncio
+async def test_pipe_stream_tolerates_broken_pipe_on_wait_closed() -> None:
+    class _FakeSource:
+        def __init__(self) -> None:
+            self._reads = [b'data', b'']
+
+        async def read(self, n: int) -> bytes:
+            return self._reads.pop(0)
+
+    class _FakeDestination:
+        def __init__(self) -> None:
+            self.writes: list[bytes] = []
+            self.closed = False
+
+        def write(self, chunk: bytes) -> None:
+            self.writes.append(chunk)
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+        async def wait_closed(self) -> None:
+            raise BrokenPipeError
+
+    source = _FakeSource()
+    destination = _FakeDestination()
+
+    await ytdlp_module._pipe_stream(source, destination)
+
+    assert destination.writes == [b'data']
+    assert destination.closed is True
+
+
+@pytest.mark.asyncio
+async def test_pipe_stream_tolerates_connection_reset_on_wait_closed() -> None:
+    class _FakeSource:
+        def __init__(self) -> None:
+            self._reads = [b'data', b'']
+
+        async def read(self, n: int) -> bytes:
+            return self._reads.pop(0)
+
+    class _FakeDestination:
+        def __init__(self) -> None:
+            self.writes: list[bytes] = []
+            self.closed = False
+
+        def write(self, chunk: bytes) -> None:
+            self.writes.append(chunk)
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+        async def wait_closed(self) -> None:
+            raise ConnectionResetError
+
+    source = _FakeSource()
+    destination = _FakeDestination()
+
+    await ytdlp_module._pipe_stream(source, destination)
+
+    assert destination.writes == [b'data']
+    assert destination.closed is True
+
+
+@pytest.mark.asyncio
+async def test_download_audio_as_opus_clipped_succeeds_when_pipe_close_hits_broken_pipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeReader:
+        def __init__(self, chunks: list[bytes] | bytes) -> None:
+            if isinstance(chunks, bytes):
+                self._chunks = [chunks]
+            else:
+                self._chunks = list(chunks)
+
+        async def read(self, n: int = -1) -> bytes:
+            if not self._chunks:
+                return b''
+            return self._chunks.pop(0)
+
+    class _FakeWriter:
+        def __init__(self) -> None:
+            self.closed = False
+            self.writes: list[bytes] = []
+
+        def write(self, chunk: bytes) -> None:
+            self.writes.append(chunk)
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+        async def wait_closed(self) -> None:
+            raise BrokenPipeError
+
+    class _YtDlpProc:
+        def __init__(self) -> None:
+            self.returncode = 0
+            self.stdout = _FakeReader([b'opus-bytes', b''])
+            self.stderr = _FakeReader(b'')
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    class _FfmpegProc:
+        def __init__(self) -> None:
+            self.returncode = 0
+            self.stdin = _FakeWriter()
+            self.stdout = _FakeReader(b'OggS-clipped')
+            self.stderr = _FakeReader(b'')
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def _fake_create_subprocess_exec(*args: str, **kwargs: object) -> object:
+        if args[0] == 'yt-dlp':
+            return _YtDlpProc()
+        return _FfmpegProc()
+
+    monkeypatch.setattr(ytdlp_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+
+    result = await ytdlp_module._download_audio_as_opus_clipped(
+        'https://example.com/watch?v=abc',
+        max_duration=timedelta(seconds=15),
+        timeout=timedelta(seconds=10),
+    )
+
+    assert result == b'OggS-clipped'

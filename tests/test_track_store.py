@@ -2,6 +2,8 @@ import asyncio
 import json
 import re
 import uuid
+from datetime import timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 from pytest import approx
@@ -43,6 +45,7 @@ from timeline_hub.types import Extension, FileBytes, InvalidExtensionError
 _UUID_1 = uuid.UUID('018f05c1-f1a3-7b34-8d29-1f53a1c9d0e1').hex
 _UUID_2 = uuid.UUID('018f05c1-f1a3-7b34-8d29-1f53a1c9d0e2').hex
 _UUID_3 = uuid.UUID('018f05c1-f1a3-7b34-8d29-1f53a1c9d0e3').hex
+_VARIANT_MAX_DURATION = timedelta(minutes=15)
 
 
 class _FakeS3Client:
@@ -310,6 +313,7 @@ def _store(
                 bootstrap_preset=bootstrap_preset,
             )
         ),
+        variant_max_duration=_VARIANT_MAX_DURATION,
     )
 
 
@@ -1390,14 +1394,18 @@ async def test_preset_store_management_methods_raise_value_error_for_unknown_pre
 @pytest.mark.asyncio
 async def test_track_store_rejects_preset_store_with_different_s3_client() -> None:
     with pytest.raises(ValueError, match='TrackStore and PresetStore must share the same S3 client instance'):
-        TrackStore(_FakeS3Client(), preset_store=_preset_store(_FakeS3Client()))
+        TrackStore(
+            _FakeS3Client(),
+            preset_store=_preset_store(_FakeS3Client()),
+            variant_max_duration=_VARIANT_MAX_DURATION,
+        )
 
 
 @pytest.mark.asyncio
 async def test_track_store_uses_provided_preset_store_without_own_preset_cache() -> None:
     s3_client = _FakeS3Client(objects={_presets_key(): _presets_bytes()})
     preset_store = _preset_store(s3_client)
-    store = TrackStore(s3_client, preset_store=preset_store)
+    store = TrackStore(s3_client, preset_store=preset_store, variant_max_duration=_VARIANT_MAX_DURATION)
 
     assert store._preset_store is preset_store
     assert not hasattr(store, '_presets_cache')
@@ -1418,8 +1426,8 @@ async def test_shared_preset_store_cache_is_reused_across_track_store_instances(
 ) -> None:
     s3_client = _FakeS3Client(objects={_presets_key(): _presets_bytes()})
     preset_store = _preset_store(s3_client)
-    first_store = TrackStore(s3_client, preset_store=preset_store)
-    second_store = TrackStore(s3_client, preset_store=preset_store)
+    first_store = TrackStore(s3_client, preset_store=preset_store, variant_max_duration=_VARIANT_MAX_DURATION)
+    second_store = TrackStore(s3_client, preset_store=preset_store, variant_max_duration=_VARIANT_MAX_DURATION)
     _patch_uuid7(monkeypatch, _UUID_1, _UUID_2)
     _patch_probe_audio_sample_rate(monkeypatch)
 
@@ -4334,6 +4342,7 @@ def _patch_create_audio_variant(monkeypatch: pytest.MonkeyPatch) -> list[dict[st
         return f'{audio_bytes.decode()}|{speed:.2f}|{reverb:.2f}'.encode()
 
     monkeypatch.setattr(track_store_module, 'create_audio_variant', _fake_create_audio_variant)
+    monkeypatch.setattr(track_store_module, 'clip_mp3', AsyncMock(side_effect=lambda audio, **_: audio))
     return calls
 
 
@@ -4732,6 +4741,7 @@ async def test_fetch_with_none_resolves_current_default_preset_and_returns_no_in
             'speed': 0.9,
             'reverb': 0.03,
             'input_sample_rate': 44_100,
+            'max_input_duration': _VARIANT_MAX_DURATION * 0.9,
             'output_format': 'mp3',
         },
         {
@@ -4739,6 +4749,7 @@ async def test_fetch_with_none_resolves_current_default_preset_and_returns_no_in
             'speed': 0.95,
             'reverb': 0.02,
             'input_sample_rate': 44_100,
+            'max_input_duration': _VARIANT_MAX_DURATION * 0.95,
             'output_format': 'mp3',
         },
     ]
@@ -4766,6 +4777,154 @@ async def test_fetch_with_none_resolves_current_default_preset_and_returns_no_in
             )
         ]
     )
+
+
+@pytest.mark.asyncio
+async def test_fetch_regeneration_clips_generated_variants_before_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_create_audio_variant(monkeypatch)
+    _patch_probe_audio_sample_rate(monkeypatch, sample_rate=44_100)
+    clip_calls: list[dict[str, object]] = []
+
+    async def _fake_clip_mp3(
+        audio: bytes,
+        *,
+        max_duration,
+        timeout=timedelta(minutes=2),
+    ) -> bytes:
+        clip_calls.append(
+            {
+                'audio': audio,
+                'max_duration': max_duration,
+                'timeout': timeout,
+            }
+        )
+        return b'clipped:' + audio
+
+    monkeypatch.setattr(track_store_module, 'clip_mp3', _fake_clip_mp3)
+
+    group = _track_group()
+    manifest_key = _manifest_key(universe=group.universe, year=group.year, season=group.season)
+    track_key = _track_key(universe=group.universe, year=group.year, season=group.season, track_id=_UUID_1)
+    cover_key = _cover_key(universe=group.universe, year=group.year, season=group.season, track_id=_UUID_1)
+    s3_client = _FakeS3Client(
+        objects={
+            _presets_key(): _presets_bytes(),
+            manifest_key: _manifest_bytes(
+                [
+                    _entry(
+                        id=_UUID_1,
+                        artists=('artist',),
+                        title='title',
+                        sub_season=SubSeason.A,
+                        order=1,
+                        preset=_applied_preset(preset_id=99, version=1),
+                        has_instrumental=False,
+                        has_instrumental_variants=False,
+                    ),
+                ]
+            ),
+            track_key: b'authoritative-track',
+            cover_key: b'cover',
+        }
+    )
+    variant_max_duration = timedelta(minutes=31)
+    store = _store(s3_client)
+    store._variant_max_duration = variant_max_duration
+
+    result = await store.fetch(group, _UUID_1)
+
+    assert clip_calls
+    assert all(call['max_duration'] == variant_max_duration for call in clip_calls)
+    assert all(variant.audio.data.startswith(b'clipped:') for variant in result.variants)
+    variant_put_calls = [call for call in s3_client.put_calls if call[0] != manifest_key]
+    assert variant_put_calls
+    assert all(data.startswith(b'clipped:') for _, data, _ in variant_put_calls)
+    assert s3_client.objects[track_key] == b'authoritative-track'
+
+
+@pytest.mark.asyncio
+async def test_fetch_regenerates_and_clips_instrumental_variants_before_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_create_audio_variant(monkeypatch)
+    _patch_probe_audio_sample_rate(monkeypatch)
+    clip_calls: list[dict[str, object]] = []
+
+    async def _fake_clip_mp3(
+        audio: bytes,
+        *,
+        max_duration,
+        timeout=timedelta(minutes=2),
+    ) -> bytes:
+        clip_calls.append({'audio': audio, 'max_duration': max_duration, 'timeout': timeout})
+        return b'clipped:' + audio
+
+    monkeypatch.setattr(track_store_module, 'clip_mp3', _fake_clip_mp3)
+
+    group = _track_group()
+    manifest_key = _manifest_key(universe=group.universe, year=group.year, season=group.season)
+    cover_key = _cover_key(universe=group.universe, year=group.year, season=group.season, track_id=_UUID_1)
+    instrumental_key = _instrumental_key(
+        universe=group.universe,
+        year=group.year,
+        season=group.season,
+        track_id=_UUID_1,
+    )
+    current_applied_preset = _applied_preset(
+        preset_id=1,
+        version=_materialized_preset_version(3),
+        preset=_sample_stored_presets()[0].preset,
+    )
+    store = _store(_FakeS3Client())
+    s3_client = _FakeS3Client(
+        objects={
+            _presets_key(): _presets_bytes(),
+            manifest_key: _manifest_bytes(
+                [
+                    _entry(
+                        id=_UUID_1,
+                        artists=('artist',),
+                        title='title',
+                        sub_season=SubSeason.A,
+                        order=1,
+                        preset=current_applied_preset,
+                        has_variants=True,
+                        has_instrumental=True,
+                        has_instrumental_variants=False,
+                    ),
+                ]
+            ),
+            cover_key: b'cover',
+            instrumental_key: b'authoritative-instrumental',
+            **_variant_storage_objects(
+                store,
+                group=group,
+                track_id=_UUID_1,
+                preset=_sample_stored_presets()[0].preset,
+                payload_prefix='orig',
+            ),
+        }
+    )
+    variant_max_duration = timedelta(minutes=29)
+    store = _store(s3_client)
+    store._variant_max_duration = variant_max_duration
+
+    result = await store.fetch(group, _UUID_1, preset_id=1)
+
+    assert result.instrumental_variants is not None
+    assert all(variant.audio.data.startswith(b'clipped:') for variant in result.instrumental_variants)
+    assert clip_calls
+    assert all(call['max_duration'] == variant_max_duration for call in clip_calls)
+    assert s3_client.objects[instrumental_key] == b'authoritative-instrumental'
+    inst_put_calls = [
+        call
+        for call in s3_client.put_calls
+        if call[0].endswith(Extension.MP3.suffix) and '-instrumental-variant-' in call[0]
+    ]
+    assert inst_put_calls
+    assert all(data.startswith(b'clipped:') for _, data, _ in inst_put_calls)
 
 
 @pytest.mark.asyncio
@@ -5045,6 +5204,9 @@ async def test_fetch_regenerates_instrumental_variants_when_manifest_flag_is_fal
     assert instrumental_key in s3_client.get_calls
     assert result.instrumental_variants is not None
     assert all(call['audio_bytes'] == b'authoritative-instrumental' for call in generation_calls)
+    assert [call['max_input_duration'] for call in generation_calls] == [
+        _VARIANT_MAX_DURATION * variant.speed for variant in result.instrumental_variants
+    ]
     rewritten_manifest = json.loads(s3_client.objects[manifest_key].decode('utf-8'))
     assert rewritten_manifest['data'][0]['has_instrumental_variants'] is True
 
